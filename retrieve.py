@@ -1,5 +1,3 @@
-"""Retrieve a ticket by its ID."""
-
 import sqlite3
 import sys
 

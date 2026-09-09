@@ -1,5 +1,3 @@
-"""Open the ticket database and initialize missing tables."""
-
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -31,4 +29,3 @@ def initialize(database: Path = DEFAULT_DATABASE) -> Path:
 
 if __name__ == "__main__":
     print(f"Database ready: {initialize()}")
-
