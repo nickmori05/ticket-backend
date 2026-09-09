@@ -1,0 +1,11 @@
+name: ticket-backend
+
+services:
+  tickets:
+    build: .
+    image: ticket-backend:local
+    volumes:
+      - ticket-data:/data
+
+volumes:
+  ticket-data:
