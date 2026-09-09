@@ -1,5 +1,3 @@
-"""Create, find, and track support tickets from the terminal."""
-
 import argparse
 import json
 from pathlib import Path
@@ -14,7 +12,7 @@ from functions import (
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
+    root = argparse.ArgumentParser(description="Create, find, and track support tickets from the terminal.")
     root.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     root.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     commands = root.add_subparsers(dest="command", required=True)

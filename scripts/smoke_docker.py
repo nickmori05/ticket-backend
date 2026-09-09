@@ -1,5 +1,3 @@
-"""Verify persistence across containers using a disposable Compose project."""
-
 import json
 from pathlib import Path
 import subprocess

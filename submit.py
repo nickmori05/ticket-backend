@@ -1,5 +1,3 @@
-"""Submit a ticket from terminal input."""
-
 import sqlite3
 import sys
 

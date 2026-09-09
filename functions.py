@@ -1,5 +1,3 @@
-"""Ticket validation and SQLite operations."""
-
 from contextlib import closing
 from pathlib import Path
 
