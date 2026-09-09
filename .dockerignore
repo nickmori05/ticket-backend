@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!db.py
+!functions.py
+!tickets.py
+!schema.sql
