@@ -61,6 +61,20 @@ ticket, `2` for invalid input or a storage error, and `130` for cancellation.
 
 ## Run with Docker
 
+Start the API with a persistent database:
+
+```sh
+docker compose up --build -d api
+curl http://127.0.0.1:8000/health
+```
+
+The API is available at `http://127.0.0.1:8000`, with interactive docs at `/docs`.
+Set `TICKETS_PORT` to change the host port if 8000 is already occupied. Port
+publishing is restricted to loopback. The API and terminal service share the
+same named data volume.
+
+Run terminal commands against that database:
+
 ```sh
 docker compose build
 docker compose run --rm tickets create
@@ -69,7 +83,7 @@ docker compose run --rm tickets status 1 closed --note "Resolved"
 docker compose run --rm tickets history 1
 ```
 
-Each command starts a container and removes it when finished. A named volume
+Each terminal command starts a container and removes it when finished. A named volume
 retains `/data/tickets.db` between runs. Docker's database is separate from the
 local `tickets.db`; use the ID printed by your Docker submission. The image
 runs as a non-root user and contains only the application code and schema.
@@ -143,9 +157,10 @@ Run the Docker integration check separately:
 python3 scripts/smoke_docker.py
 ```
 
-It builds the image, writes and retrieves a ticket across separate containers,
-checks status history and non-root execution, then removes only its temporary
-Compose project and volume. GitHub Actions runs this check on Linux alongside
+It builds the image, checks that the API and CLI share data, recreates the API
+container and retrieves a saved ticket, and checks non-root execution. It uses
+a random loopback port and removes only its temporary Compose project and
+volume. GitHub Actions runs this check on Linux alongside
 the Python suite on versions 3.10, 3.11, and 3.14.
 
 ## How it works
