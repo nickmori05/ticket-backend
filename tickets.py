@@ -6,7 +6,7 @@ import sys
 
 from db import DEFAULT_DATABASE
 from functions import (
-    STATUSES, TicketNotFoundError, create_ticket, get_ticket, list_tickets,
+    STATUSES, IdempotencyConflictError, TicketNotFoundError, create_ticket, get_ticket, list_tickets,
     set_status, statistics, ticket_history,
 )
 
@@ -19,6 +19,7 @@ def parser() -> argparse.ArgumentParser:
     create = commands.add_parser("create", help="Submit a new ticket")
     create.add_argument("--title", help="Prompted for when omitted")
     create.add_argument("--message", help="Prompted for when omitted")
+    create.add_argument("--idempotency-key", help="Reuse this key when retrying the same submission")
     show = commands.add_parser("show", help="Retrieve one ticket")
     show.add_argument("id", type=int)
     listing = commands.add_parser("list", help="Find recent tickets")
@@ -68,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("JSON mode requires --title and --message; it never prompts.")
             title = args.title if args.title is not None else input("Topic: ")
             message = args.message if args.message is not None else input("Message: ")
-            result = create_ticket(title, message, args.database)
+            result = create_ticket(title, message, args.database, idempotency_key=args.idempotency_key)
         elif args.command == "show":
             result = get_ticket(args.id, args.database)
         elif args.command == "list":
@@ -83,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     except TicketNotFoundError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
+    except IdempotencyConflictError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 3
     except (ValueError, OSError, sqlite3.Error) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2
