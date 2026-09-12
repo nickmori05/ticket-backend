@@ -1,5 +1,7 @@
 from contextlib import closing
+import json
 from pathlib import Path
+import re
 
 from db import DEFAULT_DATABASE, connect
 
@@ -8,6 +10,10 @@ STATUSES = ("open", "in_progress", "closed")
 
 
 class TicketNotFoundError(LookupError):
+    pass
+
+
+class IdempotencyConflictError(ValueError):
     pass
 
 
@@ -26,11 +32,33 @@ def _identifier(ticket_id: int) -> int:
     return ticket_id
 
 
-def create_ticket(title: str, message: str, database: Path = DEFAULT_DATABASE) -> dict:
+def create_ticket(
+    title: str,
+    message: str,
+    database: Path = DEFAULT_DATABASE,
+    *,
+    idempotency_key: str | None = None,
+) -> dict:
     title = _text(title, "Title", 120)
     message = _text(message, "Message", 10_000)
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str)
+        or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", idempotency_key)
+    ):
+        raise ValueError("Idempotency key must be 1-128 ASCII letters, digits, dots, underscores, or hyphens.")
     with closing(connect(database)) as connection:
         with connection:
+            if idempotency_key is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                previous = connection.execute(
+                    "SELECT response_json FROM ticket_submissions WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if previous is not None:
+                    ticket = json.loads(previous["response_json"])
+                    if ticket["title"] != title or ticket["message"] != message:
+                        raise IdempotencyConflictError("Idempotency key was already used for different ticket content.")
+                    return ticket
             cursor = connection.execute(
                 "INSERT INTO tickets (title, message) VALUES (?, ?)",
                 (title, message),
@@ -42,7 +70,13 @@ def create_ticket(title: str, message: str, database: Path = DEFAULT_DATABASE) -
                 "INSERT INTO ticket_events (ticket_id, to_status) VALUES (?, 'open')",
                 (row["id"],),
             )
-        return dict(row)
+            ticket = dict(row)
+            if idempotency_key is not None:
+                connection.execute(
+                    "INSERT INTO ticket_submissions (idempotency_key, ticket_id, response_json) VALUES (?, ?, ?)",
+                    (idempotency_key, ticket["id"], json.dumps(ticket, ensure_ascii=False)),
+                )
+        return ticket
 
 
 def get_ticket(ticket_id: int, database: Path = DEFAULT_DATABASE) -> dict:
