@@ -23,7 +23,8 @@ writing, and SQL parameters keep user input separate from query instructions.
 The database is created automatically when a command first needs it.
 
 `tickets.db` lives beside the Python files and is excluded from Git. Existing
-tickets survive repeated database initialization.
+tickets survive repeated database initialization. Optional submission keys
+prevent retries from creating duplicate tickets.
 
 ## Ticket workflow
 
@@ -57,7 +58,8 @@ python3 tickets.py --database /tmp/ticket-demo.db --json list
 
 JSON output goes to stdout; errors go to stderr. JSON creation requires both
 fields and never prompts. Exit codes are `0` for success, `1` for a missing
-ticket, `2` for invalid input or a storage error, and `130` for cancellation.
+ticket, `2` for invalid input or a storage error, `3` for a conflicting submission
+key, and `130` for cancellation.
 
 ## Run with Docker
 
@@ -133,10 +135,53 @@ file; an absolute path avoids dependence on the working directory.
 | `GET /tickets/{id}/history` | Read recorded changes |
 | `GET /stats` | Count tickets by status |
 
-Missing tickets return 404, invalid request fields return 422, and storage
-failures return 503 without exposing local database paths. The API has no
-authentication and is intended for local use. Keep it bound to loopback until
-access control is added.
+Missing tickets return 404, conflicting submission keys return 409, invalid
+request fields return 422, and storage failures return 503 without exposing local
+database paths. The API has no authentication and is intended for local use.
+Keep it bound to loopback until access control is added.
+
+## Retry a submission
+
+Choose one key for each new submission and keep it for retries. These examples
+use `login-demo-1`; use a fresh random identifier, such as a UUID, for real submissions.
+
+```sh
+python3 tickets.py create --title "Login issue" --message "Cannot sign in" \
+  --idempotency-key login-demo-1
+```
+
+Running that command again returns the same ticket. The HTTP equivalent is:
+
+```sh
+curl -i http://127.0.0.1:8000/tickets \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: login-demo-1' \
+  -d '{"title":"Login issue","message":"Cannot sign in"}'
+```
+
+The CLI and API share keys when they use the same database. Docker uses its own
+data volume, so local and Docker submissions do not share keys by default.
+
+| Submission | Result |
+| --- | --- |
+| New key | Create a ticket and save the original response |
+| Same key and same content | Return the original ticket JSON; HTTP keeps 201 and the same `Location` |
+| Same key, different title or message | HTTP 409 or CLI exit code 3; existing data stays unchanged |
+| No key | Create a new ticket every time |
+
+Keys are case-sensitive and accept 1-128 ASCII letters, digits, dots, underscores,
+or hyphens. Title and message comparisons use their validated, whitespace-trimmed
+values. An invalid request does not reserve its key.
+
+A replay returns the original creation response, even if the ticket has since
+been closed. Use `show` or `GET /tickets/{id}` for its current state. Replays never
+reopen tickets or add history entries. The client must retain the key and content
+after an uncertain result; generating a new key on every retry defeats this protection.
+
+Submission records survive process and container restarts and have no automatic
+expiry. They are global within this local database. Before adding multiple users,
+scope keys to authenticated owners and define a retention policy. Keys are not
+credentials, and this feature does not add authentication or automatic retries.
 
 ## Tests
 
@@ -148,6 +193,8 @@ python -m unittest discover -s tests -v
 Tests use temporary databases and cover persistence, existing data, assigned
 IDs, SQL-shaped input, validation, missing tickets, concurrent submissions,
 transaction rollback, search, pagination, and terminal/JSON workflows.
+Submission tests cover concurrent retries and conflicts, rollback of all three
+records, replay after status changes, and compatibility with existing databases.
 API tests exercise HTTP responses, body validation, shared persistence, status
 history, filters, and storage errors without contacting external services.
 
@@ -158,7 +205,9 @@ python3 scripts/smoke_docker.py
 ```
 
 It builds the image, checks that the API and CLI share data, recreates the API
-container and retrieves a saved ticket, and checks non-root execution. It uses
+container and retrieves a saved ticket, and checks non-root execution. It also
+retries an HTTP submission after recreation and from a separate CLI container,
+checking that ticket and history counts stay unchanged. It uses
 a random loopback port and removes only its temporary Compose project and
 volume. GitHub Actions runs this check on Linux alongside
 the Python suite on versions 3.10, 3.11, and 3.14.
@@ -175,13 +224,20 @@ Terminal input or CLI arguments      HTTP requests
            |
          db.py             connections and schema initialization
            |
-       SQLite file         tickets and ticket_events tables
+       SQLite file         tickets, ticket_events, ticket_submissions
 ```
 
 `submit.py` and `retrieve.py` retain the original prompt-based entry points.
 SQLite assigns IDs during insertion, avoiding a separate read-and-increment
 operation. Status changes acquire the write transaction before reading the
 old status, so the update and history describe the same change.
+
+Keyed creation acquires a write transaction before checking the submission key.
+The key is a database primary key, and the ticket, initial history entry, and
+saved response commit together. Concurrent attempts serialize through SQLite;
+if a writer cannot acquire the lock within the connection's five-second timeout,
+the existing storage-error response applies. Failed transactions leave no
+partially created submission.
 
 ## Scope
 

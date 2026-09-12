@@ -24,9 +24,11 @@ def main() -> int:
     def command(*arguments):
         return json.loads(run("run", "--rm", "-T", "tickets", "--json", *arguments))
 
-    def request(base, path, method="GET", payload=None):
+    def request(base, path, method="GET", payload=None, idempotency_key=None):
         body = json.dumps(payload).encode() if payload is not None else None
         headers = {"Content-Type": "application/json"} if payload is not None else {}
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
         with urlopen(Request(base + path, data=body, headers=headers, method=method), timeout=5) as response:
             return response.status, json.load(response)
 
@@ -52,9 +54,12 @@ def main() -> int:
         address = api_address()
         status, response = request(address, f"/tickets/{identifier}")
         assert status == 200 and response["status"] == "closed"
-        status, submitted = request(address, "/tickets", "POST",
-                                    {"title": "HTTP ticket", "message": "Shared with CLI"})
+        payload = {"title": "HTTP ticket", "message": "Shared with CLI"}
+        key = uuid.uuid4().hex
+        status, submitted = request(address, "/tickets", "POST", payload, key)
         assert status == 201
+        status, replayed = request(address, "/tickets", "POST", payload, key)
+        assert status == 201 and replayed == submitted
         http_id = str(submitted["id"])
         assert command("show", http_id) == submitted
         request(address, f"/tickets/{http_id}/status", "PATCH", {"status": "closed", "note": "Done"})
@@ -62,7 +67,14 @@ def main() -> int:
         run("up", "-d", "--no-build", "--force-recreate", "--wait", "--wait-timeout", "30", "api")
         status, restored = request(api_address(), f"/tickets/{http_id}")
         assert status == 200 and restored["status"] == "closed"
-        print("Docker CLI/API sharing, container recreation, and non-root execution passed.")
+        status, replayed = request(api_address(), "/tickets", "POST", payload, key)
+        assert status == 201 and replayed == submitted, "Retry did not survive container recreation"
+        assert command("create", "--title", payload["title"], "--message", payload["message"],
+                       "--idempotency-key", key) == submitted
+        assert command("show", http_id)["status"] == "closed", "Retry changed the current ticket"
+        assert command("stats")["total"] == 2, "Retry created a duplicate ticket"
+        assert len(command("history", http_id)) == 2, "Retry added duplicate history"
+        print("Docker CLI/API sharing, persistent retries, container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)

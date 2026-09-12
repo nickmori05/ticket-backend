@@ -17,3 +17,9 @@ CREATE TABLE IF NOT EXISTS ticket_events (
 
 CREATE INDEX IF NOT EXISTS ticket_events_ticket_id ON ticket_events(ticket_id, id);
 CREATE INDEX IF NOT EXISTS tickets_status_id ON tickets(status, id);
+
+CREATE TABLE IF NOT EXISTS ticket_submissions (
+    idempotency_key TEXT PRIMARY KEY NOT NULL,
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id),
+    response_json TEXT NOT NULL
+);
