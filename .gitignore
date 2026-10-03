@@ -7,3 +7,11 @@ __pycache__/
 *.db-wal
 *.sqlite3
 .DS_Store
+
+# Local assistant and editor state
+.codex/
+.cursor/
+.claude/
+codex/
+cursor/
+claude/
