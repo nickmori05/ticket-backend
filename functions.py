@@ -174,3 +174,31 @@ def statistics(database: Path = DEFAULT_DATABASE) -> dict:
         for row in connection.execute("SELECT status, COUNT(*) AS count FROM tickets GROUP BY status"):
             counts[row["status"]] = row["count"]
     return {"total": sum(counts.values()), "by_status": counts}
+
+
+def add_comment(ticket_id: int, body: str, database: Path = DEFAULT_DATABASE) -> dict:
+    ticket_id = _identifier(ticket_id)
+    body = _text(body, "Comment", 5_000)
+    with closing(connect(database)) as connection:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT id FROM tickets WHERE id = ?", (ticket_id,)).fetchone() is None:
+                raise TicketNotFoundError(f"Ticket #{ticket_id} was not found.")
+            cursor = connection.execute(
+                "INSERT INTO ticket_comments (ticket_id, body) VALUES (?, ?)", (ticket_id, body)
+            )
+            return dict(connection.execute(
+                "SELECT * FROM ticket_comments WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone())
+
+
+def list_comments(ticket_id: int, database: Path = DEFAULT_DATABASE) -> list[dict]:
+    ticket_id = _identifier(ticket_id)
+    with closing(connect(database)) as connection:
+        if connection.execute("SELECT id FROM tickets WHERE id = ?", (ticket_id,)).fetchone() is None:
+            raise TicketNotFoundError(f"Ticket #{ticket_id} was not found.")
+        return [
+            dict(row) for row in connection.execute(
+                "SELECT * FROM ticket_comments WHERE ticket_id = ? ORDER BY id", (ticket_id,)
+            )
+        ]
