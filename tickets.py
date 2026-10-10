@@ -6,8 +6,8 @@ import sys
 
 from db import DEFAULT_DATABASE
 from functions import (
-    STATUSES, IdempotencyConflictError, TicketNotFoundError, create_ticket, get_ticket, list_tickets,
-    set_status, statistics, ticket_history,
+    STATUSES, IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket,
+    list_comments, list_tickets, set_status, statistics, ticket_history,
 )
 
 
@@ -33,6 +33,11 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("--note", default="", help="Reason for this change (up to 500 characters)")
     history = commands.add_parser("history", help="Show a ticket's recorded changes")
     history.add_argument("id", type=int)
+    comment = commands.add_parser("comment", help="Add a comment to a ticket")
+    comment.add_argument("id", type=int)
+    comment.add_argument("body", help="Comment text (up to 5000 characters)")
+    comments = commands.add_parser("comments", help="Show a ticket's comments")
+    comments.add_argument("id", type=int)
     commands.add_parser("stats", help="Count tickets by status")
     return root
 
@@ -55,6 +60,14 @@ def display(command: str, result) -> None:
             print(f"{row['created_at']} UTC: {previous} -> {row['to_status']}")
             if row["note"]:
                 print(f"  {row['note']}")
+    elif command == "comment":
+        print(f"Comment #{result['id']} added to ticket #{result['ticket_id']}")
+    elif command == "comments":
+        if not result:
+            print("No comments on this ticket.")
+        for row in result:
+            print(f"{row['created_at']} UTC:")
+            print(f"  {row['body']}")
     elif command == "stats":
         print(f"Total: {result['total']}")
         for status, count in result["by_status"].items():
@@ -79,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
             result = set_status(args.id, args.status, args.database, note=args.note)
         elif args.command == "history":
             result = ticket_history(args.id, args.database)
+        elif args.command == "comment":
+            result = add_comment(args.id, args.body, args.database)
+        elif args.command == "comments":
+            result = list_comments(args.id, args.database)
         else:
             result = statistics(args.database)
     except TicketNotFoundError as error:
