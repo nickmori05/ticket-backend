@@ -23,3 +23,12 @@ CREATE TABLE IF NOT EXISTS ticket_submissions (
     ticket_id INTEGER NOT NULL REFERENCES tickets(id),
     response_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ticket_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id),
+    body TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ticket_comments_ticket_id ON ticket_comments(ticket_id, id);

@@ -10,8 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from db import DEFAULT_DATABASE
 from functions import (
-    IdempotencyConflictError, TicketNotFoundError, create_ticket, get_ticket, list_tickets,
-    set_status, statistics, ticket_history,
+    IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket,
+    list_comments, list_tickets, set_status, statistics, ticket_history,
 )
 
 
@@ -49,6 +49,18 @@ class EventOutput(BaseModel):
     created_at: str
 
 
+class CommentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    body: str = Field(min_length=1, max_length=5_000, strict=True)
+
+
+class CommentOutput(BaseModel):
+    id: int
+    ticket_id: int
+    body: str
+    created_at: str
+
+
 class StatsOutput(BaseModel):
     total: int
     by_status: dict[str, int]
@@ -56,7 +68,7 @@ class StatsOutput(BaseModel):
 
 def create_app(database: Path | None = None) -> FastAPI:
     database = Path(database if database is not None else os.environ.get("TICKETS_DATABASE", DEFAULT_DATABASE))
-    app = FastAPI(title="Ticket Backend", version="0.3.0")
+    app = FastAPI(title="Ticket Backend", version="0.4.0")
 
     @app.exception_handler(TicketNotFoundError)
     async def missing_ticket(_request: Request, error: TicketNotFoundError):
@@ -114,6 +126,14 @@ def create_app(database: Path | None = None) -> FastAPI:
     @app.get("/tickets/{ticket_id}/history", response_model=list[EventOutput])
     def history(ticket_id: TicketId):
         return ticket_history(ticket_id, database)
+
+    @app.post("/tickets/{ticket_id}/comments", status_code=201, response_model=CommentOutput)
+    def comment(ticket_id: TicketId, payload: CommentInput):
+        return add_comment(ticket_id, payload.body, database)
+
+    @app.get("/tickets/{ticket_id}/comments", response_model=list[CommentOutput])
+    def comments(ticket_id: TicketId):
+        return list_comments(ticket_id, database)
 
     @app.get("/stats", response_model=StatsOutput)
     def stats():

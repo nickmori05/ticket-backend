@@ -3,7 +3,8 @@
 [![Tests](https://github.com/nickmori05/ticket-backend/actions/workflows/tests.yml/badge.svg)](https://github.com/nickmori05/ticket-backend/actions/workflows/tests.yml)
 
 A Python and SQLite ticket tracker with terminal commands and an HTTP API.
-Submit a ticket, retrieve it by ID, and track its status changes. Requires
+Submit a ticket, retrieve it by ID, track its status changes, and keep
+working notes as comments. Requires
 Python 3.10 or later. The terminal commands use the standard library; the
 optional API uses FastAPI and Uvicorn.
 
@@ -35,6 +36,8 @@ python3 tickets.py list --status open --search login
 python3 tickets.py status 1 in_progress --note "Investigating"
 python3 tickets.py status 1 closed --note "Fixed the login form"
 python3 tickets.py history 1
+python3 tickets.py comment 1 "Asked the customer for a screenshot"
+python3 tickets.py comments 1
 python3 tickets.py stats
 ```
 
@@ -45,6 +48,10 @@ reopened. Setting the current status again does not add a duplicate event.
 Status updates and their history entries are committed in the same transaction.
 Tickets that existed before history was added retain their data and start
 recording history with their next status change.
+
+Comments are free-form notes of up to 5000 characters, listed oldest first.
+They can be added in any status, including after a ticket is closed, and never
+change its status or history.
 
 Lists are newest first, with `--limit` (1–100, default 20) and `--offset`.
 Search matches literal text in the title or message. `%` is treated as text.
@@ -118,6 +125,10 @@ curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
   -H 'Content-Type: application/json' \
   -d '{"status":"closed","note":"Fixed"}'
 curl http://127.0.0.1:8000/tickets/1/history
+curl -i http://127.0.0.1:8000/tickets/1/comments \
+  -H 'Content-Type: application/json' \
+  -d '{"body":"Asked the customer for a screenshot"}'
+curl http://127.0.0.1:8000/tickets/1/comments
 ```
 
 Use the ID returned by the POST request. Successful creation returns HTTP 201
@@ -133,6 +144,8 @@ file; an absolute path avoids dependence on the working directory.
 | `GET /tickets/{id}` | Retrieve a ticket |
 | `PATCH /tickets/{id}/status` | Change status with an optional note |
 | `GET /tickets/{id}/history` | Read recorded changes |
+| `POST /tickets/{id}/comments` | Add a comment from JSON `body`; returns 201 |
+| `GET /tickets/{id}/comments` | Read comments, oldest first |
 | `GET /stats` | Count tickets by status |
 
 Missing tickets return 404, conflicting submission keys return 409, invalid
@@ -197,6 +210,8 @@ Submission tests cover concurrent retries and conflicts, rollback of all three
 records, replay after status changes, and compatibility with existing databases.
 API tests exercise HTTP responses, body validation, shared persistence, status
 history, filters, and storage errors without contacting external services.
+Comment tests cover validation, ordering, isolation between tickets, rollback,
+existing databases, and the CLI and HTTP interfaces.
 
 Run the Docker integration check separately:
 
@@ -224,7 +239,8 @@ Terminal input or CLI arguments      HTTP requests
            |
          db.py             connections and schema initialization
            |
-       SQLite file         tickets, ticket_events, ticket_submissions
+       SQLite file         tickets, ticket_events, ticket_submissions,
+                     ticket_comments
 ```
 
 `submit.py` and `retrieve.py` retain the original prompt-based entry points.
@@ -246,6 +262,9 @@ users. SQLite serializes writers, so this
 design targets local workflows rather than a busy shared service. Initialization
 adds missing tables and indexes; it does not modify existing column definitions.
 Existing tickets are preserved, and history is not reconstructed for older work.
+
+Comments have no author because the tracker has no users yet; access control
+should attribute them. Comments cannot be edited or deleted.
 
 Next steps: add access control before sharing the API, then model email delivery
 with retries and recorded delivery attempts.
