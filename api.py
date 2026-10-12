@@ -58,6 +58,7 @@ class CommentOutput(BaseModel):
     id: int
     ticket_id: int
     body: str
+    author: str | None
     created_at: str
 
 
