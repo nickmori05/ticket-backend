@@ -15,10 +15,23 @@ def connect(database: Path = DEFAULT_DATABASE) -> sqlite3.Connection:
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript((FOLDER / "schema.sql").read_text(encoding="utf-8"))
+        _add_missing_columns(connection)
     except Exception:
         connection.close()
         raise
     return connection
+
+
+def _add_missing_columns(connection: sqlite3.Connection) -> None:
+    # CREATE TABLE IF NOT EXISTS leaves older tables as they were, so add new columns here.
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(ticket_comments)")}
+    if "author" not in columns:
+        try:
+            connection.execute("ALTER TABLE ticket_comments ADD COLUMN author TEXT")
+        except sqlite3.OperationalError as error:
+            # Another connection may have added the column after the check above.
+            if "duplicate column" not in str(error):
+                raise
 
 
 def initialize(database: Path = DEFAULT_DATABASE) -> Path:

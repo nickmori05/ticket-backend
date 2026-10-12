@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import uuid
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -24,9 +25,13 @@ def main() -> int:
     def command(*arguments):
         return json.loads(run("run", "--rm", "-T", "tickets", "--json", *arguments))
 
-    def request(base, path, method="GET", payload=None, idempotency_key=None):
+    token = None
+
+    def request(base, path, method="GET", payload=None, idempotency_key=None, authorized=True):
         body = json.dumps(payload).encode() if payload is not None else None
         headers = {"Content-Type": "application/json"} if payload is not None else {}
+        if authorized:
+            headers["Authorization"] = f"Bearer {token}"
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
         with urlopen(Request(base + path, data=body, headers=headers, method=method), timeout=5) as response:
@@ -50,8 +55,14 @@ def main() -> int:
         assert command("show", identifier)["status"] == "closed"
         assert len(command("history", identifier)) == 2
         assert command("stats")["total"] == 1
+        token = command("token", "create", "smoke")["token"]
         run("up", "-d", "--no-build", "--wait", "--wait-timeout", "30", "api")
         address = api_address()
+        try:
+            request(address, f"/tickets/{identifier}", authorized=False)
+            raise AssertionError("API accepted a request without a token")
+        except HTTPError as error:
+            assert error.code == 401, f"Expected 401 without a token, got {error.code}"
         status, response = request(address, f"/tickets/{identifier}")
         assert status == 200 and response["status"] == "closed"
         payload = {"title": "HTTP ticket", "message": "Shared with CLI"}
@@ -65,6 +76,9 @@ def main() -> int:
         request(address, f"/tickets/{http_id}/status", "PATCH", {"status": "closed", "note": "Done"})
         assert len(command("history", http_id)) == 2
         run("up", "-d", "--no-build", "--force-recreate", "--wait", "--wait-timeout", "30", "api")
+        status, comment = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "From HTTP"})
+        assert status == 201 and comment["author"] == "smoke"
+        assert command("comments", http_id)[0]["author"] == "smoke", "CLI did not see the comment author"
         status, restored = request(api_address(), f"/tickets/{http_id}")
         assert status == 200 and restored["status"] == "closed"
         status, replayed = request(api_address(), "/tickets", "POST", payload, key)
@@ -74,7 +88,14 @@ def main() -> int:
         assert command("show", http_id)["status"] == "closed", "Retry changed the current ticket"
         assert command("stats")["total"] == 2, "Retry created a duplicate ticket"
         assert len(command("history", http_id)) == 2, "Retry added duplicate history"
-        print("Docker CLI/API sharing, persistent retries, container recreation, and non-root execution passed.")
+        command("token", "revoke", "smoke")
+        try:
+            request(api_address(), "/stats")
+            raise AssertionError("API accepted a revoked token")
+        except HTTPError as error:
+            assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
+        print("Docker CLI/API sharing, API tokens, persistent retries, container recreation, "
+              "and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)

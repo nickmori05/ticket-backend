@@ -6,8 +6,9 @@ import sys
 
 from db import DEFAULT_DATABASE
 from functions import (
-    STATUSES, IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket,
-    list_comments, list_tickets, set_status, statistics, ticket_history,
+    STATUSES, IdempotencyConflictError, TicketNotFoundError, TokenNotFoundError, add_comment, create_ticket,
+    create_token, get_ticket, list_comments, list_tickets, list_tokens, revoke_token, set_status, statistics,
+    ticket_history,
 )
 
 
@@ -39,10 +40,17 @@ def parser() -> argparse.ArgumentParser:
     comments = commands.add_parser("comments", help="Show a ticket's comments")
     comments.add_argument("id", type=int)
     commands.add_parser("stats", help="Count tickets by status")
+    token = commands.add_parser("token", help="Manage API tokens")
+    actions = token.add_subparsers(dest="action", required=True)
+    token_create = actions.add_parser("create", help="Create a token; it is shown only once")
+    token_create.add_argument("name", help="1-64 letters, digits, dots, underscores, or hyphens")
+    actions.add_parser("list", help="Show token names and whether they are active")
+    token_revoke = actions.add_parser("revoke", help="Stop a token from authenticating")
+    token_revoke.add_argument("name")
     return root
 
 
-def display(command: str, result) -> None:
+def display(command: str, result, action: str | None = None) -> None:
     if command in ("create", "show", "status"):
         print(f"#{result['id']} [{result['status']}] {result['title']}")
         print(result["message"])
@@ -66,12 +74,23 @@ def display(command: str, result) -> None:
         if not result:
             print("No comments on this ticket.")
         for row in result:
-            print(f"{row['created_at']} UTC:")
+            print(f"{row['created_at']} UTC, {row['author'] or 'local'}:")
             print(f"  {row['body']}")
     elif command == "stats":
         print(f"Total: {result['total']}")
         for status, count in result["by_status"].items():
             print(f"{status}: {count}")
+    elif action == "create":
+        print(f"Token for {result['name']}: {result['token']}")
+        print("Store it now; it cannot be shown again.")
+    elif action == "list":
+        if not result:
+            print("No API tokens.")
+        for row in result:
+            state = f"revoked {row['revoked_at']} UTC" if row["revoked_at"] else "active"
+            print(f"{row['name']} (created {row['created_at']} UTC, {state})")
+    elif action == "revoke":
+        print(f"Token {result['name']} revoked.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,9 +115,15 @@ def main(argv: list[str] | None = None) -> int:
             result = add_comment(args.id, args.body, args.database)
         elif args.command == "comments":
             result = list_comments(args.id, args.database)
-        else:
+        elif args.command == "stats":
             result = statistics(args.database)
-    except TicketNotFoundError as error:
+        elif args.action == "create":
+            result = create_token(args.name, args.database)
+        elif args.action == "list":
+            result = list_tokens(args.database)
+        else:
+            result = revoke_token(args.name, args.database)
+    except (TicketNotFoundError, TokenNotFoundError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     except IdempotencyConflictError as error:
@@ -113,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        display(args.command, result)
+        display(args.command, result, getattr(args, "action", None))
     return 0
 
 

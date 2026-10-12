@@ -4,8 +4,8 @@
 
 A Python and SQLite ticket tracker with terminal commands and an HTTP API.
 Submit a ticket, retrieve it by ID, track its status changes, and keep
-working notes as comments. Requires
-Python 3.10 or later. The terminal commands use the standard library; the
+working notes as comments. The API requires a token created from the terminal.
+Requires Python 3.10 or later. The terminal commands use the standard library; the
 optional API uses FastAPI and Uvicorn.
 
 ```sh
@@ -39,6 +39,9 @@ python3 tickets.py history 1
 python3 tickets.py comment 1 "Asked the customer for a screenshot"
 python3 tickets.py comments 1
 python3 tickets.py stats
+python3 tickets.py token create alice
+python3 tickets.py token list
+python3 tickets.py token revoke alice
 ```
 
 Use the ID returned by `create`. Omit `--title` or `--message` for terminal
@@ -51,7 +54,8 @@ recording history with their next status change.
 
 Comments are free-form notes of up to 5000 characters, listed oldest first.
 They can be added in any status, including after a ticket is closed, and never
-change its status or history.
+change its status or history. Comments added over HTTP record the name of the
+API token that wrote them; terminal comments have no author and display as `local`.
 
 Lists are newest first, with `--limit` (1–100, default 20) and `--offset`.
 Search matches literal text in the title or message. `%` is treated as text.
@@ -65,8 +69,8 @@ python3 tickets.py --database /tmp/ticket-demo.db --json list
 
 JSON output goes to stdout; errors go to stderr. JSON creation requires both
 fields and never prompts. Exit codes are `0` for success, `1` for a missing
-ticket, `2` for invalid input or a storage error, `3` for a conflicting submission
-key, and `130` for cancellation.
+ticket or token, `2` for invalid input or a storage error, `3` for a conflicting
+submission key, and `130` for cancellation.
 
 ## Run with Docker
 
@@ -75,11 +79,13 @@ Start the API with a persistent database:
 ```sh
 docker compose up --build -d api
 curl http://127.0.0.1:8000/health
+docker compose run --rm tickets token create alice
 ```
 
 The API is available at `http://127.0.0.1:8000`, with interactive docs at `/docs`.
-Set `TICKETS_PORT` to change the host port if 8000 is already occupied. Port
-publishing is restricted to loopback. The API and terminal service share the
+Ticket endpoints need a token from the Docker database, as created above; a token
+from the local `tickets.db` will not work there. Set `TICKETS_PORT` to change the
+host port if 8000 is already occupied. Port publishing is restricted to loopback. The API and terminal service share the
 same named data volume.
 
 Run terminal commands against that database:
@@ -113,22 +119,34 @@ python -m pip install -r requirements.txt
 python -m uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
-Open [the interactive API docs](http://127.0.0.1:8000/docs), or use another
-terminal:
+Every endpoint except `/health` and the docs requires a bearer token. Create one
+in another terminal against the same database. It is printed once; store it
+somewhere safe:
+
+```sh
+python3 tickets.py token create alice
+export TICKETS_TOKEN=tkt_...   # the value printed above
+```
+
+Open [the interactive API docs](http://127.0.0.1:8000/docs) and use **Authorize**,
+or call the API with `curl`:
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"title":"Login issue","message":"Cannot sign in"}'
-curl http://127.0.0.1:8000/tickets/1
+curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1
 curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"status":"closed","note":"Fixed"}'
-curl http://127.0.0.1:8000/tickets/1/history
+curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1/history
 curl -i http://127.0.0.1:8000/tickets/1/comments \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"body":"Asked the customer for a screenshot"}'
-curl http://127.0.0.1:8000/tickets/1/comments
+curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1/comments
 ```
 
 Use the ID returned by the POST request. Successful creation returns HTTP 201
@@ -138,20 +156,33 @@ file; an absolute path avoids dependence on the working directory.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /health` | Process health; does not check database availability |
+| `GET /health` | Process health; does not check database availability or need a token |
 | `POST /tickets` | Create a ticket from JSON `title` and `message` |
 | `GET /tickets` | List with optional `status`, `search`, `limit`, and `offset` |
 | `GET /tickets/{id}` | Retrieve a ticket |
 | `PATCH /tickets/{id}/status` | Change status with an optional note |
 | `GET /tickets/{id}/history` | Read recorded changes |
-| `POST /tickets/{id}/comments` | Add a comment from JSON `body`; returns 201 |
+| `POST /tickets/{id}/comments` | Add a comment from JSON `body`, attributed to the token; returns 201 |
 | `GET /tickets/{id}/comments` | Read comments, oldest first |
 | `GET /stats` | Count tickets by status |
 
-Missing tickets return 404, conflicting submission keys return 409, invalid
-request fields return 422, and storage failures return 503 without exposing local
-database paths. The API has no authentication and is intended for local use.
-Keep it bound to loopback until access control is added.
+Missing, unknown, or revoked tokens return 401 before any ticket is read. Missing
+tickets return 404, conflicting submission keys return 409, invalid request fields
+return 422, and storage failures return 503 without exposing local database paths.
+
+## API tokens
+
+Tokens are managed only from the terminal, because anyone who can run
+`tickets.py` can already read and write the database directly. Each token has a
+unique name of 1-64 ASCII letters, digits, dots, underscores, or hyphens. The
+database stores a SHA-256 hash of each token, never the token itself, so a lost
+token cannot be recovered: revoke it and create one with a new name. Revocation
+takes effect on the next request. Names are never reused, so comment authors stay
+unambiguous after a token is revoked.
+
+Every token has the same full access to tickets. There are no roles, expiry, or
+rate limits, and tokens travel in plain text over HTTP, so keep the API bound to
+loopback or put it behind HTTPS before sharing it.
 
 ## Retry a submission
 
@@ -167,6 +198,7 @@ Running that command again returns the same ticket. The HTTP equivalent is:
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: login-demo-1' \
   -d '{"title":"Login issue","message":"Cannot sign in"}'
@@ -192,9 +224,10 @@ reopen tickets or add history entries. The client must retain the key and conten
 after an uncertain result; generating a new key on every retry defeats this protection.
 
 Submission records survive process and container restarts and have no automatic
-expiry. They are global within this local database. Before adding multiple users,
-scope keys to authenticated owners and define a retention policy. Keys are not
-credentials, and this feature does not add authentication or automatic retries.
+expiry. They are global within this local database rather than scoped to an API
+token, so any token holder can replay another caller's submission with the same key
+and content. Scope keys to tokens and define a retention policy before giving tokens
+to separate teams. Keys are not credentials and do not add automatic retries.
 
 ## Tests
 
@@ -211,7 +244,10 @@ records, replay after status changes, and compatibility with existing databases.
 API tests exercise HTTP responses, body validation, shared persistence, status
 history, filters, and storage errors without contacting external services.
 Comment tests cover validation, ordering, isolation between tickets, rollback,
-existing databases, and the CLI and HTTP interfaces.
+existing databases, and the CLI and HTTP interfaces. Token tests cover hashed
+storage, revocation, name validation, the 401 response on every ticket route,
+comment attribution, older comment tables gaining an author column, and the CLI
+token commands.
 
 Run the Docker integration check separately:
 
@@ -222,7 +258,9 @@ python3 scripts/smoke_docker.py
 It builds the image, checks that the API and CLI share data, recreates the API
 container and retrieves a saved ticket, and checks non-root execution. It also
 retries an HTTP submission after recreation and from a separate CLI container,
-checking that ticket and history counts stay unchanged. It uses
+checking that ticket and history counts stay unchanged. It creates an API token
+with the CLI container, checks that the API rejects requests without it, attributes
+an HTTP comment to it, and checks that revoking it from the CLI takes effect. It uses
 a random loopback port and removes only its temporary Compose project and
 volume. GitHub Actions runs this check on Linux alongside
 the Python suite on versions 3.10, 3.11, and 3.14.
@@ -240,7 +278,7 @@ Terminal input or CLI arguments      HTTP requests
          db.py             connections and schema initialization
            |
        SQLite file         tickets, ticket_events, ticket_submissions,
-                     ticket_comments
+                     ticket_comments, api_tokens
 ```
 
 `submit.py` and `retrieve.py` retain the original prompt-based entry points.
@@ -257,14 +295,16 @@ partially created submission.
 
 ## Scope
 
-This is a local support-ticket tracker. It does not send email or authenticate
-users. SQLite serializes writers, so this
+This is a local support-ticket tracker. It does not send email, and API tokens
+identify callers without separating their permissions. SQLite serializes writers, so this
 design targets local workflows rather than a busy shared service. Initialization
-adds missing tables and indexes; it does not modify existing column definitions.
-Existing tickets are preserved, and history is not reconstructed for older work.
+adds missing tables, indexes, and the comment `author` column; it does not modify
+existing column definitions. Existing tickets are preserved, and history is not
+reconstructed for older work.
 
-Comments have no author because the tracker has no users yet; access control
-should attribute them. Comments cannot be edited or deleted.
+Comments written before tokens existed, and comments added from the terminal,
+have no author. Status changes are not attributed yet. Comments cannot be edited
+or deleted.
 
-Next steps: add access control before sharing the API, then model email delivery
+Next steps: record which token made each status change, then model email delivery
 with retries and recorded delivery attempts.
