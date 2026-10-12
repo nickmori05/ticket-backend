@@ -8,7 +8,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from api import create_app
-from functions import add_comment, create_ticket, get_ticket, list_comments
+from functions import add_comment, create_ticket, create_token, get_ticket, list_comments
 import tickets
 
 
@@ -17,7 +17,8 @@ class CommentApiTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.database = Path(directory.name) / "tickets.db"
-        self.client = TestClient(create_app(self.database))
+        self.headers = {"Authorization": f"Bearer {create_token('alice', self.database)['token']}"}
+        self.client = TestClient(create_app(self.database), headers=self.headers)
         self.addCleanup(self.client.close)
         self.identifier = create_ticket("Login", "Cannot sign in", self.database)["id"]
         self.url = f"/tickets/{self.identifier}/comments"
@@ -26,6 +27,7 @@ class CommentApiTests(unittest.TestCase):
         response = self.client.post(self.url, json={"body": " Asked for logs "})
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["body"], "Asked for logs")
+        self.assertEqual(response.json()["author"], "alice")
         add_comment(self.identifier, "From terminal", self.database)
         listed = self.client.get(self.url).json()
         self.assertEqual([row["body"] for row in listed], ["Asked for logs", "From terminal"])
@@ -45,7 +47,7 @@ class CommentApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/tickets/0/comments").status_code, 422)
 
     def test_storage_errors_return_503(self):
-        broken = TestClient(create_app(self.database.with_name("directory")))
+        broken = TestClient(create_app(self.database.with_name("directory")), headers=self.headers)
         self.addCleanup(broken.close)
         self.database.with_name("directory").mkdir()
         with self.assertLogs("api", level="ERROR"):
@@ -80,7 +82,9 @@ class CommentCliTests(unittest.TestCase):
         code, output, _ = self.run_command("comment", self.identifier, "Asked for logs", json_mode=False)
         self.assertEqual(code, 0)
         self.assertIn(f"added to ticket #{self.identifier}", output)
-        self.assertIn("  Asked for logs", self.run_command("comments", self.identifier, json_mode=False)[1])
+        listed = self.run_command("comments", self.identifier, json_mode=False)[1]
+        self.assertIn("UTC, local:", listed)
+        self.assertIn("  Asked for logs", listed)
 
     def test_errors_use_existing_exit_codes(self):
         code, output, errors = self.run_command("comment", "99", "Body")

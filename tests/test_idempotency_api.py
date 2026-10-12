@@ -7,7 +7,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from api import create_app
-from functions import create_ticket, list_tickets, ticket_history
+from functions import create_ticket, create_token, list_tickets, ticket_history
 
 
 class IdempotencyApiTests(unittest.TestCase):
@@ -15,7 +15,8 @@ class IdempotencyApiTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.database = Path(directory.name) / "tickets.db"
-        self.client = TestClient(create_app(self.database))
+        self.authorization = {"Authorization": f"Bearer {create_token('tests', self.database)['token']}"}
+        self.client = TestClient(create_app(self.database), headers=self.authorization)
         self.addCleanup(self.client.close)
         self.payload = {"title": "Login", "message": "Cannot sign in"}
         self.headers = {"Idempotency-Key": "submission-1"}
@@ -25,7 +26,7 @@ class IdempotencyApiTests(unittest.TestCase):
         self.assertEqual(first.status_code, 201)
         location = first.headers["Location"]
         self.client.patch(location + "/status", json={"status": "closed"})
-        with TestClient(create_app(self.database)) as reopened:
+        with TestClient(create_app(self.database), headers=self.authorization) as reopened:
             retry = reopened.post("/tickets", json=self.payload, headers=self.headers)
             self.assertEqual(reopened.get(location).json()["status"], "closed")
         self.assertEqual(retry.status_code, 201)
@@ -48,17 +49,17 @@ class IdempotencyApiTests(unittest.TestCase):
         self.assertEqual((first.status_code, second.status_code), (201, 201))
         self.assertNotEqual(first.json()["id"], second.json()["id"])
 
-    def test_invalid_keys_return_422_without_creating_a_database(self):
+    def test_invalid_keys_return_422_without_creating_a_ticket(self):
         for key in ("", "has space", "x" * 129, "a,b"):
             with self.subTest(key=key):
                 response = self.client.post("/tickets", json=self.payload, headers={"Idempotency-Key": key})
                 self.assertEqual(response.status_code, 422)
-        self.assertFalse(self.database.exists())
+        self.assertEqual(list_tickets(self.database), [])
 
     def test_invalid_payload_does_not_consume_the_key(self):
         response = self.client.post("/tickets", json={"title": " ", "message": "Body"}, headers=self.headers)
         self.assertEqual(response.status_code, 422)
-        self.assertFalse(self.database.exists())
+        self.assertEqual(list_tickets(self.database), [])
         self.assertEqual(self.client.post("/tickets", json=self.payload, headers=self.headers).status_code, 201)
 
     def test_http_retry_finds_a_submission_created_through_shared_storage(self):
@@ -72,7 +73,7 @@ class IdempotencyApiTests(unittest.TestCase):
         barrier = threading.Barrier(4)
 
         def submit(_):
-            with TestClient(create_app(self.database)) as client:
+            with TestClient(create_app(self.database), headers=self.authorization) as client:
                 barrier.wait(timeout=5)
                 return client.post("/tickets", json=self.payload, headers=self.headers)
 

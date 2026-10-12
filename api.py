@@ -4,19 +4,23 @@ from pathlib import Path
 import sqlite3
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, Header, Path as PathParameter, Query, Request, Response
+from fastapi import (
+    APIRouter, Depends, FastAPI, Header, HTTPException, Path as PathParameter, Query, Request, Response,
+)
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from db import DEFAULT_DATABASE
 from functions import (
-    IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket,
+    IdempotencyConflictError, TicketNotFoundError, add_comment, authenticate, create_ticket, get_ticket,
     list_comments, list_tickets, set_status, statistics, ticket_history,
 )
 
 
 Status = Literal["open", "in_progress", "closed"]
 TicketId = Annotated[int, PathParameter(gt=0)]
+bearer = HTTPBearer(auto_error=False, description="A token from `tickets.py token create NAME`.")
 logger = logging.getLogger(__name__)
 
 
@@ -69,7 +73,7 @@ class StatsOutput(BaseModel):
 
 def create_app(database: Path | None = None) -> FastAPI:
     database = Path(database if database is not None else os.environ.get("TICKETS_DATABASE", DEFAULT_DATABASE))
-    app = FastAPI(title="Ticket Backend", version="0.4.0")
+    app = FastAPI(title="Ticket Backend", version="0.5.0")
 
     @app.exception_handler(TicketNotFoundError)
     async def missing_ticket(_request: Request, error: TicketNotFoundError):
@@ -90,11 +94,22 @@ def create_app(database: Path | None = None) -> FastAPI:
     app.add_exception_handler(sqlite3.Error, unavailable_storage)
     app.add_exception_handler(OSError, unavailable_storage)
 
+    def caller(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> str:
+        name = authenticate(credentials.credentials if credentials else None, database)
+        if name is None:
+            raise HTTPException(status_code=401, detail="A valid API token is required.",
+                                headers={"WWW-Authenticate": "Bearer"})
+        return name
+
+    # Every route except /health requires a token; FastAPI reuses the result within a request.
+    protected = APIRouter(dependencies=[Depends(caller)],
+                          responses={401: {"description": "Missing, unknown, or revoked API token"}})
+
     @app.get("/health")
     def health() -> dict:
         return {"status": "ok"}
 
-    @app.post("/tickets", status_code=201, response_model=TicketOutput,
+    @protected.post("/tickets", status_code=201, response_model=TicketOutput,
               responses={409: {"description": "Submission key already used for different ticket content"}})
     def submit(
         payload: TicketInput,
@@ -107,7 +122,7 @@ def create_app(database: Path | None = None) -> FastAPI:
         response.headers["Location"] = f"/tickets/{ticket['id']}"
         return ticket
 
-    @app.get("/tickets", response_model=list[TicketOutput])
+    @protected.get("/tickets", response_model=list[TicketOutput])
     def listing(
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
@@ -116,30 +131,31 @@ def create_app(database: Path | None = None) -> FastAPI:
     ):
         return list_tickets(database, limit, offset=offset, status=status, search=search)
 
-    @app.get("/tickets/{ticket_id}", response_model=TicketOutput)
+    @protected.get("/tickets/{ticket_id}", response_model=TicketOutput)
     def show(ticket_id: TicketId):
         return get_ticket(ticket_id, database)
 
-    @app.patch("/tickets/{ticket_id}/status", response_model=TicketOutput)
+    @protected.patch("/tickets/{ticket_id}/status", response_model=TicketOutput)
     def change_status(ticket_id: TicketId, payload: StatusInput):
         return set_status(ticket_id, payload.status, database, note=payload.note)
 
-    @app.get("/tickets/{ticket_id}/history", response_model=list[EventOutput])
+    @protected.get("/tickets/{ticket_id}/history", response_model=list[EventOutput])
     def history(ticket_id: TicketId):
         return ticket_history(ticket_id, database)
 
-    @app.post("/tickets/{ticket_id}/comments", status_code=201, response_model=CommentOutput)
-    def comment(ticket_id: TicketId, payload: CommentInput):
-        return add_comment(ticket_id, payload.body, database)
+    @protected.post("/tickets/{ticket_id}/comments", status_code=201, response_model=CommentOutput)
+    def comment(ticket_id: TicketId, payload: CommentInput, author: Annotated[str, Depends(caller)]):
+        return add_comment(ticket_id, payload.body, database, author=author)
 
-    @app.get("/tickets/{ticket_id}/comments", response_model=list[CommentOutput])
+    @protected.get("/tickets/{ticket_id}/comments", response_model=list[CommentOutput])
     def comments(ticket_id: TicketId):
         return list_comments(ticket_id, database)
 
-    @app.get("/stats", response_model=StatsOutput)
+    @protected.get("/stats", response_model=StatsOutput)
     def stats():
         return statistics(database)
 
+    app.include_router(protected)
     return app
 
 
