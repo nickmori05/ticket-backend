@@ -33,6 +33,10 @@ def _text(value: str, name: str, maximum: int) -> str:
     return value
 
 
+def _author(author: str | None) -> str | None:
+    return None if author is None else _text(author, "Author", 64)
+
+
 def _identifier(ticket_id: int) -> int:
     if type(ticket_id) is not int or ticket_id < 1:
         raise ValueError("Ticket ID must be a positive integer.")
@@ -45,9 +49,11 @@ def create_ticket(
     database: Path = DEFAULT_DATABASE,
     *,
     idempotency_key: str | None = None,
+    author: str | None = None,
 ) -> dict:
     title = _text(title, "Title", 120)
     message = _text(message, "Message", 10_000)
+    author = _author(author)
     if idempotency_key is not None and (
         not isinstance(idempotency_key, str)
         or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", idempotency_key)
@@ -74,8 +80,8 @@ def create_ticket(
                 "SELECT * FROM tickets WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()
             connection.execute(
-                "INSERT INTO ticket_events (ticket_id, to_status) VALUES (?, 'open')",
-                (row["id"],),
+                "INSERT INTO ticket_events (ticket_id, to_status, author) VALUES (?, 'open', ?)",
+                (row["id"], author),
             )
             ticket = dict(row)
             if idempotency_key is not None:
@@ -136,12 +142,14 @@ def set_status(
     database: Path = DEFAULT_DATABASE,
     *,
     note: str = "",
+    author: str | None = None,
 ) -> dict:
     ticket_id = _identifier(ticket_id)
     if status not in STATUSES:
         raise ValueError(f"Status must be one of: {', '.join(STATUSES)}.")
     if not isinstance(note, str) or len(note.strip()) > 500:
         raise ValueError("Note must be text of at most 500 characters.")
+    author = _author(author)
     with closing(connect(database)) as connection:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -154,9 +162,9 @@ def set_status(
                 return dict(row)
             connection.execute("UPDATE tickets SET status = ? WHERE id = ?", (status, ticket_id))
             connection.execute(
-                """INSERT INTO ticket_events (ticket_id, from_status, to_status, note)
-                   VALUES (?, ?, ?, ?)""",
-                (ticket_id, row["status"], status, note.strip()),
+                """INSERT INTO ticket_events (ticket_id, from_status, to_status, note, author)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (ticket_id, row["status"], status, note.strip(), author),
             )
             return dict(connection.execute(
                 "SELECT * FROM tickets WHERE id = ?", (ticket_id,)
@@ -192,8 +200,7 @@ def add_comment(
 ) -> dict:
     ticket_id = _identifier(ticket_id)
     body = _text(body, "Comment", 5_000)
-    if author is not None:
-        author = _text(author, "Author", 64)
+    author = _author(author)
     with closing(connect(database)) as connection:
         with connection:
             connection.execute("BEGIN IMMEDIATE")

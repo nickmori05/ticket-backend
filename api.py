@@ -50,6 +50,7 @@ class EventOutput(BaseModel):
     from_status: Status | None
     to_status: Status
     note: str
+    author: str | None
     created_at: str
 
 
