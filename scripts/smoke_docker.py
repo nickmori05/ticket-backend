@@ -74,7 +74,9 @@ def main() -> int:
         http_id = str(submitted["id"])
         assert command("show", http_id) == submitted
         request(address, f"/tickets/{http_id}/status", "PATCH", {"status": "closed", "note": "Done"})
-        assert len(command("history", http_id)) == 2
+        events = command("history", http_id)
+        assert [event["author"] for event in events] == ["smoke", "smoke"], "CLI did not see status authors"
+        assert command("history", identifier)[-1]["author"] is None, "CLI status change gained an author"
         run("up", "-d", "--no-build", "--force-recreate", "--wait", "--wait-timeout", "30", "api")
         status, comment = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "From HTTP"})
         assert status == 201 and comment["author"] == "smoke"
@@ -94,7 +96,7 @@ def main() -> int:
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens, persistent retries, container recreation, "
+        print("Docker CLI/API sharing, API tokens, status attribution, persistent retries, container recreation, "
               "and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:

@@ -65,7 +65,7 @@ def display(command: str, result, action: str | None = None) -> None:
             print("No recorded changes for this ticket.")
         for row in result:
             previous = row["from_status"] or "created"
-            print(f"{row['created_at']} UTC: {previous} -> {row['to_status']}")
+            print(f"{row['created_at']} UTC, {row['author'] or 'local'}: {previous} -> {row['to_status']}")
             if row["note"]:
                 print(f"  {row['note']}")
     elif command == "comment":

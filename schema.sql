@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS ticket_events (
     from_status TEXT,
     to_status TEXT NOT NULL CHECK(to_status IN ('open', 'in_progress', 'closed')),
     note TEXT NOT NULL DEFAULT '',
+    author TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

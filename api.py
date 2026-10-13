@@ -50,6 +50,7 @@ class EventOutput(BaseModel):
     from_status: Status | None
     to_status: Status
     note: str
+    author: str | None
     created_at: str
 
 
@@ -114,11 +115,13 @@ def create_app(database: Path | None = None) -> FastAPI:
     def submit(
         payload: TicketInput,
         response: Response,
+        author: Annotated[str, Depends(caller)],
         idempotency_key: Annotated[str | None, Header(
             description="Reuse for retries of one submission. 1-128 ASCII letters, digits, dots, underscores, or hyphens."
         )] = None,
     ):
-        ticket = create_ticket(payload.title, payload.message, database, idempotency_key=idempotency_key)
+        ticket = create_ticket(payload.title, payload.message, database,
+                               idempotency_key=idempotency_key, author=author)
         response.headers["Location"] = f"/tickets/{ticket['id']}"
         return ticket
 
@@ -136,8 +139,8 @@ def create_app(database: Path | None = None) -> FastAPI:
         return get_ticket(ticket_id, database)
 
     @protected.patch("/tickets/{ticket_id}/status", response_model=TicketOutput)
-    def change_status(ticket_id: TicketId, payload: StatusInput):
-        return set_status(ticket_id, payload.status, database, note=payload.note)
+    def change_status(ticket_id: TicketId, payload: StatusInput, author: Annotated[str, Depends(caller)]):
+        return set_status(ticket_id, payload.status, database, note=payload.note, author=author)
 
     @protected.get("/tickets/{ticket_id}/history", response_model=list[EventOutput])
     def history(ticket_id: TicketId):

@@ -52,6 +52,11 @@ Status updates and their history entries are committed in the same transaction.
 Tickets that existed before history was added retain their data and start
 recording history with their next status change.
 
+Each history entry records who made it. Tickets created and status changes made
+over HTTP record the name of the API token used; terminal changes have no author
+and display as `local` in `history`. Entries recorded before attribution existed
+also have no author.
+
 Comments are free-form notes of up to 5000 characters, listed oldest first.
 They can be added in any status, including after a ticket is closed, and never
 change its status or history. Comments added over HTTP record the name of the
@@ -157,11 +162,11 @@ file; an absolute path avoids dependence on the working directory.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Process health; does not check database availability or need a token |
-| `POST /tickets` | Create a ticket from JSON `title` and `message` |
+| `POST /tickets` | Create a ticket from JSON `title` and `message`, attributed to the token |
 | `GET /tickets` | List with optional `status`, `search`, `limit`, and `offset` |
 | `GET /tickets/{id}` | Retrieve a ticket |
-| `PATCH /tickets/{id}/status` | Change status with an optional note |
-| `GET /tickets/{id}/history` | Read recorded changes |
+| `PATCH /tickets/{id}/status` | Change status with an optional note, attributed to the token |
+| `GET /tickets/{id}/history` | Read recorded changes, each with its `author` |
 | `POST /tickets/{id}/comments` | Add a comment from JSON `body`, attributed to the token; returns 201 |
 | `GET /tickets/{id}/comments` | Read comments, oldest first |
 | `GET /stats` | Count tickets by status |
@@ -177,8 +182,8 @@ Tokens are managed only from the terminal, because anyone who can run
 unique name of 1-64 ASCII letters, digits, dots, underscores, or hyphens. The
 database stores a SHA-256 hash of each token, never the token itself, so a lost
 token cannot be recovered: revoke it and create one with a new name. Revocation
-takes effect on the next request. Names are never reused, so comment authors stay
-unambiguous after a token is revoked.
+takes effect on the next request. Names are never reused, so comment and status-change
+authors stay unambiguous after a token is revoked.
 
 Every token has the same full access to tickets. There are no roles, expiry, or
 rate limits, and tokens travel in plain text over HTTP, so keep the API bound to
@@ -247,7 +252,10 @@ Comment tests cover validation, ordering, isolation between tickets, rollback,
 existing databases, and the CLI and HTTP interfaces. Token tests cover hashed
 storage, revocation, name validation, the 401 response on every ticket route,
 comment attribution, older comment tables gaining an author column, and the CLI
-token commands.
+token commands. Status attribution tests cover authors on creation and status
+changes from each interface, rejected and unchanged updates writing nothing, revoked
+tokens, a replay by another token, older history tables gaining an author column,
+and the `history` output.
 
 Run the Docker integration check separately:
 
@@ -260,7 +268,7 @@ container and retrieves a saved ticket, and checks non-root execution. It also
 retries an HTTP submission after recreation and from a separate CLI container,
 checking that ticket and history counts stay unchanged. It creates an API token
 with the CLI container, checks that the API rejects requests without it, attributes
-an HTTP comment to it, and checks that revoking it from the CLI takes effect. It uses
+HTTP status changes and an HTTP comment to it, and checks that revoking it from the CLI takes effect. It uses
 a random loopback port and removes only its temporary Compose project and
 volume. GitHub Actions runs this check on Linux alongside
 the Python suite on versions 3.10, 3.11, and 3.14.
@@ -298,13 +306,13 @@ partially created submission.
 This is a local support-ticket tracker. It does not send email, and API tokens
 identify callers without separating their permissions. SQLite serializes writers, so this
 design targets local workflows rather than a busy shared service. Initialization
-adds missing tables, indexes, and the comment `author` column; it does not modify
+adds missing tables, indexes, and the `author` columns on comments and history; it does not modify
 existing column definitions. Existing tickets are preserved, and history is not
 reconstructed for older work.
 
 Comments written before tokens existed, and comments added from the terminal,
-have no author. Status changes are not attributed yet. Comments cannot be edited
+have no author. The same applies to status history. Authors are token names, not
+people; anyone holding a token acts under its name. Comments cannot be edited
 or deleted.
 
-Next steps: record which token made each status change, then model email delivery
-with retries and recorded delivery attempts.
+Next steps: model email delivery with retries and recorded delivery attempts.
