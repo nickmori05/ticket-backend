@@ -65,7 +65,7 @@ def main() -> int:
             assert error.code == 401, f"Expected 401 without a token, got {error.code}"
         status, response = request(address, f"/tickets/{identifier}")
         assert status == 200 and response["status"] == "closed"
-        payload = {"title": "HTTP ticket", "message": "Shared with CLI"}
+        payload = {"title": "HTTP ticket", "message": "Shared with CLI", "email": "requester@example.com"}
         key = uuid.uuid4().hex
         status, submitted = request(address, "/tickets", "POST", payload, key)
         assert status == 201
@@ -77,6 +77,9 @@ def main() -> int:
         events = command("history", http_id)
         assert [event["author"] for event in events] == ["smoke", "smoke"], "CLI did not see status authors"
         assert command("history", identifier)[-1]["author"] is None, "CLI status change gained an author"
+        queued = command("outbox", "--status", "pending")
+        assert [(row["ticket_id"], row["recipient"]) for row in queued] == [(int(http_id), payload["email"])] * 2, \
+            "CLI did not see notifications queued over HTTP"
         run("up", "-d", "--no-build", "--force-recreate", "--wait", "--wait-timeout", "30", "api")
         status, comment = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "From HTTP"})
         assert status == 201 and comment["author"] == "smoke"
@@ -86,18 +89,19 @@ def main() -> int:
         status, replayed = request(api_address(), "/tickets", "POST", payload, key)
         assert status == 201 and replayed == submitted, "Retry did not survive container recreation"
         assert command("create", "--title", payload["title"], "--message", payload["message"],
-                       "--idempotency-key", key) == submitted
+                       "--email", payload["email"], "--idempotency-key", key) == submitted
         assert command("show", http_id)["status"] == "closed", "Retry changed the current ticket"
         assert command("stats")["total"] == 2, "Retry created a duplicate ticket"
         assert len(command("history", http_id)) == 2, "Retry added duplicate history"
+        assert len(command("outbox")) == 2, "Retry queued a duplicate notification"
         command("token", "revoke", "smoke")
         try:
             request(api_address(), "/stats")
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens, status attribution, persistent retries, container recreation, "
-              "and non-root execution passed.")
+        print("Docker CLI/API sharing, API tokens, status attribution, notification outbox, persistent retries, "
+              "container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)
