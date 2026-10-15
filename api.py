@@ -41,6 +41,7 @@ class TicketOutput(BaseModel):
     title: str
     message: str
     status: Status
+    email: str | None
     created_at: str
 
 
