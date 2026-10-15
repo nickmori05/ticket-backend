@@ -4,7 +4,8 @@
 
 A Python and SQLite ticket tracker with terminal commands and an HTTP API.
 Submit a ticket, retrieve it by ID, track its status changes, and keep
-working notes as comments. The API requires a token created from the terminal.
+working notes as comments. Tickets with a requester email queue a notification
+for each status change. The API requires a token created from the terminal.
 Requires Python 3.10 or later. The terminal commands use the standard library; the
 optional API uses FastAPI and Uvicorn.
 
@@ -30,7 +31,7 @@ prevent retries from creating duplicate tickets.
 ## Ticket workflow
 
 ```sh
-python3 tickets.py create --title "Login issue" --message "Cannot sign in"
+python3 tickets.py create --title "Login issue" --message "Cannot sign in" --email pat@example.com
 python3 tickets.py show 1
 python3 tickets.py list --status open --search login
 python3 tickets.py status 1 in_progress --note "Investigating"
@@ -39,6 +40,7 @@ python3 tickets.py history 1
 python3 tickets.py comment 1 "Asked the customer for a screenshot"
 python3 tickets.py comments 1
 python3 tickets.py stats
+python3 tickets.py outbox --status pending
 python3 tickets.py token create alice
 python3 tickets.py token list
 python3 tickets.py token revoke alice
@@ -61,6 +63,8 @@ Comments are free-form notes of up to 5000 characters, listed oldest first.
 They can be added in any status, including after a ticket is closed, and never
 change its status or history. Comments added over HTTP record the name of the
 API token that wrote them; terminal comments have no author and display as `local`.
+
+`--email` is optional and is never prompted for; see [Notifications](#notifications).
 
 Lists are newest first, with `--limit` (1–100, default 20) and `--offset`.
 Search matches literal text in the title or message. `%` is treated as text.
@@ -140,7 +144,7 @@ or call the API with `curl`:
 curl -i http://127.0.0.1:8000/tickets \
   -H "Authorization: Bearer $TICKETS_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"title":"Login issue","message":"Cannot sign in"}'
+  -d '{"title":"Login issue","message":"Cannot sign in","email":"pat@example.com"}'
 curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1
 curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
   -H "Authorization: Bearer $TICKETS_TOKEN" \
@@ -162,7 +166,7 @@ file; an absolute path avoids dependence on the working directory.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Process health; does not check database availability or need a token |
-| `POST /tickets` | Create a ticket from JSON `title` and `message`, attributed to the token |
+| `POST /tickets` | Create a ticket from JSON `title`, `message`, and optional `email`, attributed to the token |
 | `GET /tickets` | List with optional `status`, `search`, `limit`, and `offset` |
 | `GET /tickets/{id}` | Retrieve a ticket |
 | `PATCH /tickets/{id}/status` | Change status with an optional note, attributed to the token |
@@ -188,6 +192,44 @@ authors stay unambiguous after a token is revoked.
 Every token has the same full access to tickets. There are no roles, expiry, or
 rate limits, and tokens travel in plain text over HTTP, so keep the API bound to
 loopback or put it behind HTTPS before sharing it.
+
+## Notifications
+
+A ticket can be created with an optional requester email, given as `--email` or
+the JSON `email` field. It must be an ASCII address such as `pat@example.com`, up
+to 254 characters, without spaces, commas, quotes, or angle brackets. It is returned
+with the ticket and cannot be changed after creation.
+
+For a ticket with an email, every history entry queues one notification in the
+`ticket_notifications` outbox, in the same transaction as the entry itself:
+creation queues a "received" message, and each status change queues a message with
+the old and new status and the note. Setting the current status again, idempotent
+replays, and comments queue nothing. The subject and body are written when the
+notification is queued, and the title is collapsed onto one line in the subject.
+
+```sh
+python3 tickets.py outbox
+python3 tickets.py --json outbox --status failed --limit 50
+```
+
+`outbox` lists notifications oldest first, with an optional `--status` of
+`pending`, `sent`, or `failed`, plus `--limit` and `--offset`. Each row shows its
+recipient, subject, attempt count, and last delivery error.
+
+Nothing is sent yet. `functions.deliver_notifications(send, database)` drains the
+outbox for a future mail sender: it calls `send(notification)` for each due pending
+notification, oldest first, up to `limit` (default 20) per call. A call that returns
+marks the notification `sent`; one that raises records the error and schedules a
+retry after `retry_delay` seconds (default 60), doubling each attempt up to a day.
+After `max_attempts` (default 5) the notification is marked `failed` and is not
+retried. Each attempt is counted and its retry scheduled before `send` runs, so a
+crash mid-send or a second sender running at the same time waits for the delay
+instead of sending at once. Delivery is still at least once: if the process stops
+after sending but before recording success, that message is sent again later.
+
+Notification emails are visible to every API token holder through the ticket and are
+stored in plain text in the database. The outbox is managed from the terminal only;
+there is no HTTP endpoint for it.
 
 ## Retry a submission
 
@@ -255,7 +297,13 @@ comment attribution, older comment tables gaining an author column, and the CLI
 token commands. Status attribution tests cover authors on creation and status
 changes from each interface, rejected and unchanged updates writing nothing, revoked
 tokens, a replay by another token, older history tables gaining an author column,
-and the `history` output.
+and the `history` output. Notification tests cover email validation, one queued
+message per history entry, unchanged statuses and replays queuing nothing, rollback
+of the ticket or status change when queuing fails, older tables gaining the email
+column, delivery success, recorded failures, retry delays, permanent failure after
+the maximum attempts, a concurrent sender skipping a claimed message, and the
+`outbox` command and HTTP `email` field. Delivery tests use in-process fake senders
+and never contact a mail server.
 
 Run the Docker integration check separately:
 
@@ -268,7 +316,9 @@ container and retrieves a saved ticket, and checks non-root execution. It also
 retries an HTTP submission after recreation and from a separate CLI container,
 checking that ticket and history counts stay unchanged. It creates an API token
 with the CLI container, checks that the API rejects requests without it, attributes
-HTTP status changes and an HTTP comment to it, and checks that revoking it from the CLI takes effect. It uses
+HTTP status changes and an HTTP comment to it, checks that the CLI outbox shows the
+notifications queued by an HTTP ticket with an email and that retries queue no more,
+and checks that revoking the token from the CLI takes effect. It uses
 a random loopback port and removes only its temporary Compose project and
 volume. GitHub Actions runs this check on Linux alongside
 the Python suite on versions 3.10, 3.11, and 3.14.
@@ -286,7 +336,7 @@ Terminal input or CLI arguments      HTTP requests
          db.py             connections and schema initialization
            |
        SQLite file         tickets, ticket_events, ticket_submissions,
-                     ticket_comments, api_tokens
+                     ticket_comments, api_tokens, ticket_notifications
 ```
 
 `submit.py` and `retrieve.py` retain the original prompt-based entry points.
@@ -303,16 +353,22 @@ partially created submission.
 
 ## Scope
 
-This is a local support-ticket tracker. It does not send email, and API tokens
-identify callers without separating their permissions. SQLite serializes writers, so this
-design targets local workflows rather than a busy shared service. Initialization
-adds missing tables, indexes, and the `author` columns on comments and history; it does not modify
-existing column definitions. Existing tickets are preserved, and history is not
-reconstructed for older work.
+This is a local support-ticket tracker. It queues notification emails but does not
+send them, and API tokens identify callers without separating their permissions.
+SQLite serializes writers, so this design targets local workflows rather than a
+busy shared service. Initialization adds missing tables, indexes, the `author`
+columns on comments and history, and the `email` column on tickets; it does not
+modify existing column definitions. Existing tickets are preserved, and history is
+not reconstructed for older work.
 
 Comments written before tokens existed, and comments added from the terminal,
 have no author. The same applies to status history. Authors are token names, not
 people; anyone holding a token acts under its name. Comments cannot be edited
 or deleted.
 
-Next steps: model email delivery with retries and recorded delivery attempts.
+Tickets created before notifications existed have no email and never queue any,
+and earlier history is not queued retroactively. There is no unsubscribe, outbox
+retention, or way to retry a `failed` notification other than editing the database.
+
+Next steps: add an SMTP sender that runs `deliver_notifications` on a schedule,
+configured through environment variables, and test it against a local mail sink.
