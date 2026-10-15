@@ -5,11 +5,13 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+from typing import Callable
 
 from db import DEFAULT_DATABASE, connect
 
 
 STATUSES = ("open", "in_progress", "closed")
+NOTIFICATION_STATUSES = ("pending", "sent", "failed")
 
 
 class TicketNotFoundError(LookupError):
@@ -37,6 +39,35 @@ def _author(author: str | None) -> str | None:
     return None if author is None else _text(author, "Author", 64)
 
 
+def _email(email: str | None) -> str | None:
+    if email is None:
+        return None
+    email = email.strip() if isinstance(email, str) else ""
+    # ASCII only, with no spaces, commas, quotes, or angle brackets, so a sender can use it as a header unchanged.
+    if len(email) > 254 or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+", email):
+        raise ValueError("Email must be an ASCII address like name@example.com, at most 254 characters.")
+    return email
+
+
+def _page(limit: int, offset: int) -> None:
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("Limit must be between 1 and 100.")
+    if type(offset) is not int or offset < 0:
+        raise ValueError("Offset must be a non-negative integer.")
+
+
+def _queue_notification(connection: sqlite3.Connection, ticket: sqlite3.Row, event_id: int, subject: str,
+                        body: str) -> None:
+    # Queued in the caller's transaction, so a notification exists exactly when its history entry does.
+    if ticket["email"] is None:
+        return
+    title = " ".join(ticket["title"].split())
+    connection.execute(
+        "INSERT INTO ticket_notifications (ticket_id, event_id, recipient, subject, body) VALUES (?, ?, ?, ?, ?)",
+        (ticket["id"], event_id, ticket["email"], f"Ticket #{ticket['id']} {subject}: {title}", body),
+    )
+
+
 def _identifier(ticket_id: int) -> int:
     if type(ticket_id) is not int or ticket_id < 1:
         raise ValueError("Ticket ID must be a positive integer.")
@@ -50,10 +81,12 @@ def create_ticket(
     *,
     idempotency_key: str | None = None,
     author: str | None = None,
+    email: str | None = None,
 ) -> dict:
     title = _text(title, "Title", 120)
     message = _text(message, "Message", 10_000)
     author = _author(author)
+    email = _email(email)
     if idempotency_key is not None and (
         not isinstance(idempotency_key, str)
         or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", idempotency_key)
@@ -69,20 +102,23 @@ def create_ticket(
                 ).fetchone()
                 if previous is not None:
                     ticket = json.loads(previous["response_json"])
-                    if ticket["title"] != title or ticket["message"] != message:
+                    # Responses saved before tickets had an email have no email key.
+                    if ticket["title"] != title or ticket["message"] != message or ticket.get("email") != email:
                         raise IdempotencyConflictError("Idempotency key was already used for different ticket content.")
                     return ticket
             cursor = connection.execute(
-                "INSERT INTO tickets (title, message) VALUES (?, ?)",
-                (title, message),
+                "INSERT INTO tickets (title, message, email) VALUES (?, ?, ?)",
+                (title, message, email),
             )
             row = connection.execute(
                 "SELECT * FROM tickets WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()
-            connection.execute(
+            event = connection.execute(
                 "INSERT INTO ticket_events (ticket_id, to_status, author) VALUES (?, 'open', ?)",
                 (row["id"], author),
             )
+            _queue_notification(connection, row, event.lastrowid, "received",
+                                f"We received your ticket #{row['id']}. Its status is open.\n\n{message}")
             ticket = dict(row)
             if idempotency_key is not None:
                 connection.execute(
@@ -111,10 +147,7 @@ def list_tickets(
     status: str | None = None,
     search: str | None = None,
 ) -> list[dict]:
-    if type(limit) is not int or not 1 <= limit <= 100:
-        raise ValueError("Limit must be between 1 and 100.")
-    if type(offset) is not int or offset < 0:
-        raise ValueError("Offset must be a non-negative integer.")
+    _page(limit, offset)
     if status is not None and status not in STATUSES:
         raise ValueError(f"Status must be one of: {', '.join(STATUSES)}.")
     clauses = []
@@ -161,11 +194,14 @@ def set_status(
             if row["status"] == status:
                 return dict(row)
             connection.execute("UPDATE tickets SET status = ? WHERE id = ?", (status, ticket_id))
-            connection.execute(
+            event = connection.execute(
                 """INSERT INTO ticket_events (ticket_id, from_status, to_status, note, author)
                    VALUES (?, ?, ?, ?, ?)""",
                 (ticket_id, row["status"], status, note.strip(), author),
             )
+            body = f"Ticket #{ticket_id} changed from {row['status']} to {status}."
+            _queue_notification(connection, row, event.lastrowid, f"is now {status}",
+                                body + (f"\n\n{note.strip()}" if note.strip() else ""))
             return dict(connection.execute(
                 "SELECT * FROM tickets WHERE id = ?", (ticket_id,)
             ).fetchone())
@@ -225,6 +261,91 @@ def list_comments(ticket_id: int, database: Path = DEFAULT_DATABASE) -> list[dic
                 "SELECT * FROM ticket_comments WHERE ticket_id = ? ORDER BY id", (ticket_id,)
             )
         ]
+
+
+def list_notifications(
+    database: Path = DEFAULT_DATABASE,
+    limit: int = 20,
+    *,
+    offset: int = 0,
+    status: str | None = None,
+) -> list[dict]:
+    _page(limit, offset)
+    if status is not None and status not in NOTIFICATION_STATUSES:
+        raise ValueError(f"Notification status must be one of: {', '.join(NOTIFICATION_STATUSES)}.")
+    where = " WHERE status = ?" if status is not None else ""
+    with closing(connect(database)) as connection:
+        return [
+            dict(row) for row in connection.execute(
+                "SELECT * FROM ticket_notifications" + where + " ORDER BY id LIMIT ? OFFSET ?",
+                (*([status] if status is not None else []), limit, offset),
+            )
+        ]
+
+
+def deliver_notifications(
+    send: Callable[[dict], None],
+    database: Path = DEFAULT_DATABASE,
+    *,
+    limit: int = 20,
+    max_attempts: int = 5,
+    retry_delay: int = 60,
+) -> dict:
+    """Pass each due notification to send(), oldest first, and record the outcome.
+
+    send() reports failure by raising. A failed attempt is retried after retry_delay seconds, doubling each
+    time up to a day, until max_attempts is reached and the notification is marked failed.
+    """
+    if not callable(send):
+        raise ValueError("Sender must be callable.")
+    _page(limit, 0)
+    if type(max_attempts) is not int or max_attempts < 1:
+        raise ValueError("Maximum attempts must be a positive integer.")
+    if type(retry_delay) is not int or retry_delay < 0:
+        raise ValueError("Retry delay must be a non-negative number of seconds.")
+    counts = {"sent": 0, "retrying": 0, "failed": 0}
+    with closing(connect(database)) as connection:
+        due = [
+            dict(row) for row in connection.execute(
+                """SELECT * FROM ticket_notifications WHERE status = 'pending'
+                   AND next_attempt_at <= CURRENT_TIMESTAMP ORDER BY id LIMIT ?""",
+                (limit,),
+            )
+        ]
+        for notification in due:
+            # Count the attempt and schedule its retry before sending, so a crash during send() or a second
+            # sender running at the same time waits for the delay instead of sending again straight away.
+            delay = min(retry_delay * 2 ** notification["attempts"], 86_400)
+            with connection:
+                claimed = connection.execute(
+                    """UPDATE ticket_notifications SET attempts = attempts + 1, next_attempt_at = datetime('now', ?)
+                       WHERE id = ? AND status = 'pending' AND attempts = ?""",
+                    (f"+{delay} seconds", notification["id"], notification["attempts"]),
+                ).rowcount
+            if not claimed:
+                continue
+            notification = dict(connection.execute(
+                "SELECT * FROM ticket_notifications WHERE id = ?", (notification["id"],)
+            ).fetchone())
+            try:
+                send(notification)
+            except Exception as error:
+                outcome = "failed" if notification["attempts"] >= max_attempts else "retrying"
+                with connection:
+                    connection.execute(
+                        "UPDATE ticket_notifications SET status = ?, last_error = ? WHERE id = ?",
+                        ("failed" if outcome == "failed" else "pending",
+                         (str(error) or type(error).__name__)[:500], notification["id"]),
+                    )
+            else:
+                outcome = "sent"
+                with connection:
+                    connection.execute(
+                        "UPDATE ticket_notifications SET status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (notification["id"],),
+                    )
+            counts[outcome] += 1
+    return counts
 
 
 def _token_name(name: str) -> str:

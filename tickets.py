@@ -6,9 +6,9 @@ import sys
 
 from db import DEFAULT_DATABASE
 from functions import (
-    STATUSES, IdempotencyConflictError, TicketNotFoundError, TokenNotFoundError, add_comment, create_ticket,
-    create_token, get_ticket, list_comments, list_tickets, list_tokens, revoke_token, set_status, statistics,
-    ticket_history,
+    NOTIFICATION_STATUSES, STATUSES, IdempotencyConflictError, TicketNotFoundError, TokenNotFoundError, add_comment,
+    create_ticket, create_token, get_ticket, list_comments, list_notifications, list_tickets, list_tokens,
+    revoke_token, set_status, statistics, ticket_history,
 )
 
 
@@ -21,6 +21,7 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--title", help="Prompted for when omitted")
     create.add_argument("--message", help="Prompted for when omitted")
     create.add_argument("--idempotency-key", help="Reuse this key when retrying the same submission")
+    create.add_argument("--email", help="Requester address to notify of status changes")
     show = commands.add_parser("show", help="Retrieve one ticket")
     show.add_argument("id", type=int)
     listing = commands.add_parser("list", help="Find recent tickets")
@@ -40,6 +41,10 @@ def parser() -> argparse.ArgumentParser:
     comments = commands.add_parser("comments", help="Show a ticket's comments")
     comments.add_argument("id", type=int)
     commands.add_parser("stats", help="Count tickets by status")
+    outbox = commands.add_parser("outbox", help="Show queued notification emails, oldest first")
+    outbox.add_argument("--status", choices=NOTIFICATION_STATUSES)
+    outbox.add_argument("--limit", type=int, default=20)
+    outbox.add_argument("--offset", type=int, default=0)
     token = commands.add_parser("token", help="Manage API tokens")
     actions = token.add_subparsers(dest="action", required=True)
     token_create = actions.add_parser("create", help="Create a token; it is shown only once")
@@ -54,6 +59,8 @@ def display(command: str, result, action: str | None = None) -> None:
     if command in ("create", "show", "status"):
         print(f"#{result['id']} [{result['status']}] {result['title']}")
         print(result["message"])
+        if result.get("email"):
+            print(f"Contact: {result['email']}")
         print(f"Created: {result['created_at']} UTC")
     elif command == "list":
         if not result:
@@ -76,6 +83,14 @@ def display(command: str, result, action: str | None = None) -> None:
         for row in result:
             print(f"{row['created_at']} UTC, {row['author'] or 'local'}:")
             print(f"  {row['body']}")
+    elif command == "outbox":
+        if not result:
+            print("No notifications found.")
+        for row in result:
+            attempts = f"{row['attempts']} attempt" + ("" if row["attempts"] == 1 else "s")
+            print(f"#{row['id']} [{row['status']}, {attempts}] {row['recipient']}: {row['subject']}")
+            if row["last_error"]:
+                print(f"  Last error: {row['last_error']}")
     elif command == "stats":
         print(f"Total: {result['total']}")
         for status, count in result["by_status"].items():
@@ -101,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("JSON mode requires --title and --message; it never prompts.")
             title = args.title if args.title is not None else input("Topic: ")
             message = args.message if args.message is not None else input("Message: ")
-            result = create_ticket(title, message, args.database, idempotency_key=args.idempotency_key)
+            result = create_ticket(title, message, args.database, idempotency_key=args.idempotency_key,
+                                   email=args.email)
         elif args.command == "show":
             result = get_ticket(args.id, args.database)
         elif args.command == "list":
@@ -117,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
             result = list_comments(args.id, args.database)
         elif args.command == "stats":
             result = statistics(args.database)
+        elif args.command == "outbox":
+            result = list_notifications(args.database, args.limit, offset=args.offset, status=args.status)
         elif args.action == "create":
             result = create_token(args.name, args.database)
         elif args.action == "list":
