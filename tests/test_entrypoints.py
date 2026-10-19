@@ -17,7 +17,7 @@ class EntrypointTests(unittest.TestCase):
         self.root = Path(directory.name)
         self.project = self.root / "project with spaces"
         self.project.mkdir()
-        for name in ("db.py", "functions.py", "tickets.py", "submit.py", "retrieve.py", "schema.sql"):
+        for name in ("db.py", "functions.py", "mailer.py", "tickets.py", "submit.py", "retrieve.py", "schema.sql"):
             shutil.copy2(ROOT / name, self.project / name)
 
     def run_script(self, name, *arguments, input=""):
@@ -41,7 +41,7 @@ class EntrypointTests(unittest.TestCase):
 
     def test_importing_modules_does_not_prompt_or_create_a_database(self):
         result = subprocess.run(
-            [sys.executable, "-c", "import db, functions, tickets, submit, retrieve"],
+            [sys.executable, "-c", "import db, functions, mailer, tickets, submit, retrieve"],
             cwd=self.project, input="", text=True, capture_output=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

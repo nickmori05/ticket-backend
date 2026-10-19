@@ -2,6 +2,7 @@
 !Dockerfile
 !db.py
 !functions.py
+!mailer.py
 !tickets.py
 !schema.sql
 !api.py

@@ -9,6 +9,16 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SEND_THROUGH_STUB = """
+import contextlib, io, json, os, tickets
+with SmtpStub() as stub:
+    os.environ.update(TICKETS_SMTP_HOST="127.0.0.1", TICKETS_SMTP_PORT=str(stub.port))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = tickets.main(["--database", "/data/tickets.db", "--json", "send-notifications"])
+print(json.dumps({"code": code, "counts": json.loads(output.getvalue()),
+                  "recipients": [recipients for _sender, recipients, _data in stub.messages]}))
+"""
 
 
 def main() -> int:
@@ -16,11 +26,12 @@ def main() -> int:
     compose = ["docker", "compose", "--project-name", project]
     environment = {**os.environ, "TICKETS_PORT": "0"}
 
-    def run(*arguments):
-        return subprocess.run(
-            [*compose, *arguments], cwd=ROOT, check=True,
+    def run(*arguments, input=None, check=True):
+        result = subprocess.run(
+            [*compose, *arguments], cwd=ROOT, check=check, input=input,
             text=True, capture_output=True, env=environment, timeout=180,
-        ).stdout
+        )
+        return result.stdout if check else result
 
     def command(*arguments):
         return json.loads(run("run", "--rm", "-T", "tickets", "--json", *arguments))
@@ -94,14 +105,27 @@ def main() -> int:
         assert command("stats")["total"] == 2, "Retry created a duplicate ticket"
         assert len(command("history", http_id)) == 2, "Retry added duplicate history"
         assert len(command("outbox")) == 2, "Retry queued a duplicate notification"
+        smtp = ["-e", "TICKETS_SMTP_FROM=support@example.com", "-e", "TICKETS_SMTP_SECURITY=none"]
+        refused = run("run", "--rm", "-T", "-e", "TICKETS_SMTP_HOST=127.0.0.1", "-e", "TICKETS_SMTP_PORT=1", *smtp,
+                      "tickets", "send-notifications", check=False)
+        assert refused.returncode == 4 and "Could not connect" in refused.stderr, "Unreachable SMTP was not reported"
+        assert [row["attempts"] for row in command("outbox")] == [0, 0], "Unreachable SMTP claimed notifications"
+        # Run the image's sender against the test SMTP stub inside the same container, so no mail leaves it.
+        driver = (ROOT / "tests" / "smtp_stub.py").read_text() + SEND_THROUGH_STUB
+        delivered = json.loads(run("run", "--rm", "-T", *smtp, "--entrypoint", "python", "tickets", "-",
+                                   input=driver).strip().splitlines()[-1])
+        assert delivered == {"code": 0, "counts": {"sent": 2, "retrying": 0, "failed": 0},
+                             "recipients": [[payload["email"]]] * 2}, f"SMTP delivery failed: {delivered}"
+        assert {row["status"] for row in command("outbox")} == {"sent"}, "CLI did not see sent notifications"
+        assert command("retry-notifications") == [], "Nothing should need retrying"
         command("token", "revoke", "smoke")
         try:
             request(api_address(), "/stats")
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens, status attribution, notification outbox, persistent retries, "
-              "container recreation, and non-root execution passed.")
+        print("Docker CLI/API sharing, API tokens, status attribution, notification outbox and SMTP delivery, "
+              "persistent retries, container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)

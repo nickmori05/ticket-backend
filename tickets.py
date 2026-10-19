@@ -6,10 +6,12 @@ import sys
 
 from db import DEFAULT_DATABASE
 from functions import (
-    NOTIFICATION_STATUSES, STATUSES, IdempotencyConflictError, TicketNotFoundError, TokenNotFoundError, add_comment,
-    create_ticket, create_token, get_ticket, list_comments, list_notifications, list_tickets, list_tokens,
-    revoke_token, set_status, statistics, ticket_history,
+    NOTIFICATION_STATUSES, STATUSES, IdempotencyConflictError, NotificationNotFoundError, TicketNotFoundError,
+    TokenNotFoundError, add_comment, count_due_notifications, create_ticket, create_token, deliver_notifications,
+    get_ticket, list_comments, list_notifications, list_tickets, list_tokens, retry_notifications, revoke_token,
+    set_status, statistics, ticket_history,
 )
+from mailer import DeliveryError, SmtpSender, settings_from_environment
 
 
 def parser() -> argparse.ArgumentParser:
@@ -45,6 +47,12 @@ def parser() -> argparse.ArgumentParser:
     outbox.add_argument("--status", choices=NOTIFICATION_STATUSES)
     outbox.add_argument("--limit", type=int, default=20)
     outbox.add_argument("--offset", type=int, default=0)
+    send = commands.add_parser("send-notifications", help="Send due notifications over SMTP (TICKETS_SMTP_* settings)")
+    send.add_argument("--limit", type=int, default=20, help="Most notifications to send in this run (1-100)")
+    send.add_argument("--max-attempts", type=int, default=5, help="Attempts before a notification is marked failed")
+    send.add_argument("--retry-delay", type=int, default=60, help="Seconds before the first retry; doubles each time")
+    retry = commands.add_parser("retry-notifications", help="Requeue failed notifications with a fresh attempt budget")
+    retry.add_argument("ids", type=int, nargs="*", metavar="ID", help="Notifications to requeue; default all failed")
     token = commands.add_parser("token", help="Manage API tokens")
     actions = token.add_subparsers(dest="action", required=True)
     token_create = actions.add_parser("create", help="Create a token; it is shown only once")
@@ -91,6 +99,13 @@ def display(command: str, result, action: str | None = None) -> None:
             print(f"#{row['id']} [{row['status']}, {attempts}] {row['recipient']}: {row['subject']}")
             if row["last_error"]:
                 print(f"  Last error: {row['last_error']}")
+    elif command == "send-notifications":
+        print(f"Sent {result['sent']}, retrying {result['retrying']}, failed {result['failed']}.")
+    elif command == "retry-notifications":
+        if not result:
+            print("No failed notifications to retry.")
+        for row in result:
+            print(f"#{row['id']} requeued for {row['recipient']}: {row['subject']}")
     elif command == "stats":
         print(f"Total: {result['total']}")
         for status, count in result["by_status"].items():
@@ -106,6 +121,20 @@ def display(command: str, result, action: str | None = None) -> None:
             print(f"{row['name']} (created {row['created_at']} UTC, {state})")
     elif action == "revoke":
         print(f"Token {result['name']} revoked.")
+
+
+def send_notifications(args: argparse.Namespace) -> dict:
+    # Settings and arguments are checked, and the server reached, before any notification is claimed.
+    settings = settings_from_environment()
+    if not 1 <= args.limit <= 100:
+        raise ValueError("Limit must be between 1 and 100.")
+    if args.max_attempts < 1 or args.retry_delay < 0:
+        raise ValueError("Maximum attempts must be positive and the retry delay must not be negative.")
+    if count_due_notifications(args.database) == 0:
+        return {"sent": 0, "retrying": 0, "failed": 0}
+    with SmtpSender(settings) as sender:
+        return deliver_notifications(sender, args.database, limit=args.limit,
+                                     max_attempts=args.max_attempts, retry_delay=args.retry_delay)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -135,18 +164,25 @@ def main(argv: list[str] | None = None) -> int:
             result = statistics(args.database)
         elif args.command == "outbox":
             result = list_notifications(args.database, args.limit, offset=args.offset, status=args.status)
+        elif args.command == "send-notifications":
+            result = send_notifications(args)
+        elif args.command == "retry-notifications":
+            result = retry_notifications(args.database, args.ids or None)
         elif args.action == "create":
             result = create_token(args.name, args.database)
         elif args.action == "list":
             result = list_tokens(args.database)
         else:
             result = revoke_token(args.name, args.database)
-    except (TicketNotFoundError, TokenNotFoundError) as error:
+    except (TicketNotFoundError, TokenNotFoundError, NotificationNotFoundError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     except IdempotencyConflictError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 3
+    except DeliveryError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 4
     except (ValueError, OSError, sqlite3.Error) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2
