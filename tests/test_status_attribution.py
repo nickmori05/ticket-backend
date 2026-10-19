@@ -8,10 +8,11 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from api import create_app
-from db import connect
-from functions import create_ticket, create_token, get_ticket, revoke_token, set_status, ticket_history
-import tickets
+from ticket_backend import cli
+from ticket_backend.api import create_app
+from ticket_backend.database import connect
+from ticket_backend.tickets import create_ticket, get_ticket, set_status, ticket_history
+from ticket_backend.tokens import create_token, revoke_token
 
 
 class StatusAttributionTests(unittest.TestCase):
@@ -145,7 +146,7 @@ class StatusAttributionCliTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         options = ["--json"] if json_mode else []
         with redirect_stdout(output), redirect_stderr(errors):
-            code = tickets.main(["--database", str(self.database), *options, *arguments])
+            code = cli.main(["--database", str(self.database), *options, *arguments])
         return code, output.getvalue(), errors.getvalue()
 
     def test_history_shows_the_author_or_local(self):

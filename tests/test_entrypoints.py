@@ -17,8 +17,9 @@ class EntrypointTests(unittest.TestCase):
         self.root = Path(directory.name)
         self.project = self.root / "project with spaces"
         self.project.mkdir()
-        for name in ("db.py", "functions.py", "mailer.py", "tickets.py", "submit.py", "retrieve.py", "schema.sql"):
-            shutil.copy2(ROOT / name, self.project / name)
+        shutil.copytree(ROOT / "ticket_backend", self.project / "ticket_backend",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy2(ROOT / "tickets.py", self.project / "tickets.py")
 
     def run_script(self, name, *arguments, input=""):
         return subprocess.run(
@@ -26,11 +27,11 @@ class EntrypointTests(unittest.TestCase):
             input=input, text=True, capture_output=True, cwd=self.root, timeout=10,
         )
 
-    def test_prompt_scripts_and_cli_share_database_from_another_directory(self):
-        submitted = self.run_script("submit.py", input="Login\nCannot sign in\n")
+    def test_cli_prompts_and_uses_the_project_database_from_another_directory(self):
+        submitted = self.run_script("tickets.py", "create", input="Login\nCannot sign in\n")
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
-        self.assertIn("Ticket #1 submitted", submitted.stdout)
-        retrieved = self.run_script("retrieve.py", input="1\n")
+        self.assertIn("Topic: Message: #1 [open] Login", submitted.stdout)
+        retrieved = self.run_script("tickets.py", "show", "1")
         self.assertEqual(retrieved.returncode, 0, retrieved.stderr)
         self.assertIn("Cannot sign in", retrieved.stdout)
         listing = self.run_script("tickets.py", "--json", "list")
@@ -38,10 +39,11 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(json.loads(listing.stdout)[0]["title"], "Login")
         self.assertTrue((self.project / "tickets.db").is_file())
         self.assertFalse((self.root / "tickets.db").exists())
+        self.assertFalse((self.project / "ticket_backend" / "tickets.db").exists())
 
     def test_importing_modules_does_not_prompt_or_create_a_database(self):
         result = subprocess.run(
-            [sys.executable, "-c", "import db, functions, mailer, tickets, submit, retrieve"],
+            [sys.executable, "-c", "import tickets, ticket_backend.cli, ticket_backend.mailer"],
             cwd=self.project, input="", text=True, capture_output=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

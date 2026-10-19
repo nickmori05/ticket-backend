@@ -5,11 +5,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from functions import (
-    NotificationNotFoundError, count_due_notifications, create_ticket, deliver_notifications, list_notifications,
+from ticket_backend import cli
+from ticket_backend.notifications import (
+    NotificationNotFoundError, count_due_notifications, deliver_notifications, list_notifications,
     retry_notifications,
 )
-import tickets
+from ticket_backend.tickets import create_ticket
 
 
 def fail(notification):
@@ -32,7 +33,7 @@ class NotificationRetryTests(unittest.TestCase):
     def run_command(self, *arguments, json_mode=False):
         output, errors = io.StringIO(), io.StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
-            code = tickets.main(["--database", str(self.database), *(["--json"] if json_mode else []), *arguments])
+            code = cli.main(["--database", str(self.database), *(["--json"] if json_mode else []), *arguments])
         return code, output.getvalue(), errors.getvalue()
 
     def test_retrying_requeues_every_failed_notification_with_a_fresh_budget(self):

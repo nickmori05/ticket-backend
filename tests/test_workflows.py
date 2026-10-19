@@ -8,12 +8,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from db import connect
-from functions import (
-    TicketNotFoundError, create_ticket, get_ticket, list_tickets,
-    set_status, statistics, ticket_history,
+from ticket_backend import cli
+from ticket_backend.database import connect
+from ticket_backend.tickets import (
+    TicketNotFoundError, create_ticket, get_ticket, list_tickets, set_status, statistics, ticket_history,
 )
-import tickets
 
 
 class WorkflowTests(unittest.TestCase):
@@ -122,7 +121,7 @@ class CliTests(unittest.TestCase):
     def run_command(self, *arguments):
         output, errors = io.StringIO(), io.StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
-            code = tickets.main(["--database", str(self.database), "--json", *arguments])
+            code = cli.main(["--database", str(self.database), "--json", *arguments])
         return code, output.getvalue(), errors.getvalue()
 
     def test_complete_json_cli_workflow(self):
@@ -138,7 +137,7 @@ class CliTests(unittest.TestCase):
     def test_interactive_submission(self):
         output = io.StringIO()
         with patch("builtins.input", side_effect=["Login", "Broken"]), redirect_stdout(output):
-            code = tickets.main(["--database", str(self.database), "create"])
+            code = cli.main(["--database", str(self.database), "create"])
         self.assertEqual(code, 0)
         self.assertIn("#1 [open] Login", output.getvalue())
 

@@ -1,9 +1,6 @@
 *
 !Dockerfile
-!db.py
-!functions.py
-!mailer.py
-!tickets.py
-!schema.sql
-!api.py
 !requirements.txt
+!tickets.py
+!ticket_backend/
+ticket_backend/**/__pycache__

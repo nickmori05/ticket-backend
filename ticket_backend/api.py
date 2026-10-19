@@ -1,3 +1,5 @@
+"""The HTTP API. Run it with `uvicorn ticket_backend.api:app`; every route except /health needs a bearer token."""
+
 import logging
 import os
 from pathlib import Path
@@ -11,11 +13,13 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
-from db import DEFAULT_DATABASE
-from functions import (
-    IdempotencyConflictError, TicketNotFoundError, add_comment, authenticate, create_ticket, get_ticket,
-    list_comments, list_tickets, set_status, statistics, ticket_history,
+from ticket_backend import __version__
+from ticket_backend.database import DEFAULT_DATABASE
+from ticket_backend.tickets import (
+    IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
+    list_tickets, set_status, statistics, ticket_history,
 )
+from ticket_backend.tokens import authenticate
 
 
 Status = Literal["open", "in_progress", "closed"]
@@ -76,8 +80,9 @@ class StatsOutput(BaseModel):
 
 
 def create_app(database: Path | None = None) -> FastAPI:
+    """Build the API for one database, defaulting to TICKETS_DATABASE or the project's tickets.db."""
     database = Path(database if database is not None else os.environ.get("TICKETS_DATABASE", DEFAULT_DATABASE))
-    app = FastAPI(title="Ticket Backend", version="0.6.0")
+    app = FastAPI(title="Ticket Backend", version=__version__)
 
     @app.exception_handler(TicketNotFoundError)
     async def missing_ticket(_request: Request, error: TicketNotFoundError):
@@ -114,13 +119,14 @@ def create_app(database: Path | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @protected.post("/tickets", status_code=201, response_model=TicketOutput,
-              responses={409: {"description": "Submission key already used for different ticket content"}})
+                    responses={409: {"description": "Submission key already used for different ticket content"}})
     def submit(
         payload: TicketInput,
         response: Response,
         author: Annotated[str, Depends(caller)],
         idempotency_key: Annotated[str | None, Header(
-            description="Reuse for retries of one submission. 1-128 ASCII letters, digits, dots, underscores, or hyphens."
+            description="Reuse for retries of one submission. "
+                        "1-128 ASCII letters, digits, dots, underscores, or hyphens."
         )] = None,
     ):
         ticket = create_ticket(payload.title, payload.message, database,

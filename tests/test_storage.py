@@ -4,8 +4,8 @@ import sqlite3
 import tempfile
 import unittest
 
-import db
-from functions import TicketNotFoundError, create_ticket, get_ticket, list_tickets
+from ticket_backend.database import initialize
+from ticket_backend.tickets import TicketNotFoundError, create_ticket, get_ticket, list_tickets
 
 
 class StorageTests(unittest.TestCase):
@@ -65,8 +65,8 @@ class StorageTests(unittest.TestCase):
                 );
                 INSERT INTO tickets (title, message) VALUES ('Existing', 'Keep me');
             """)
-        db.initialize(self.database)
-        db.initialize(self.database)
+        initialize(self.database)
+        initialize(self.database)
         self.assertEqual(get_ticket(1, self.database)["message"], "Keep me")
 
     def test_invalid_list_limit_is_rejected(self):

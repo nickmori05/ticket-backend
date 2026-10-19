@@ -6,10 +6,9 @@ import tempfile
 import threading
 import unittest
 
-from db import connect, initialize
-from functions import (
-    IdempotencyConflictError, create_ticket, get_ticket, list_tickets,
-    set_status, ticket_history,
+from ticket_backend.database import connect, initialize
+from ticket_backend.tickets import (
+    IdempotencyConflictError, create_ticket, get_ticket, list_tickets, set_status, ticket_history,
 )
 
 

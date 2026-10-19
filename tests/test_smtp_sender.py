@@ -9,10 +9,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from functions import create_ticket, deliver_notifications, list_notifications, set_status
-from mailer import DeliveryError, SmtpSender, SmtpSettings, build_message, settings_from_environment
+from ticket_backend import cli
+from ticket_backend.notifications import deliver_notifications, list_notifications
+from ticket_backend.tickets import create_ticket, set_status
+from ticket_backend.mailer import DeliveryError, SmtpSender, SmtpSettings, build_message, settings_from_environment
 from smtp_stub import SmtpStub
-import tickets
 
 
 def closed_port():
@@ -109,7 +110,7 @@ class SmtpDeliveryTests(unittest.TestCase):
                 redirect_stdout(output), redirect_stderr(errors):
             for key in [key for key, value in variables.items() if value is None]:
                 os.environ.pop(key, None)
-            code = tickets.main(["--database", str(self.database), *arguments])
+            code = cli.main(["--database", str(self.database), *arguments])
         return code, output.getvalue(), errors.getvalue()
 
     def test_sender_delivers_the_outbox_over_one_connection(self):

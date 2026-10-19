@@ -6,8 +6,9 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from api import create_app
-from functions import create_ticket, create_token, list_tickets, ticket_history
+from ticket_backend.api import create_app
+from ticket_backend.tickets import create_ticket, list_tickets, ticket_history
+from ticket_backend.tokens import create_token
 
 
 class IdempotencyApiTests(unittest.TestCase):

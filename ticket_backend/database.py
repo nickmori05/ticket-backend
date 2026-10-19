@@ -1,20 +1,24 @@
+"""SQLite connections. Every connection applies schema.sql, so a new or older database is ready to use."""
+
 from contextlib import closing
 from pathlib import Path
 import sqlite3
 
 
-FOLDER = Path(__file__).resolve().parent
-DEFAULT_DATABASE = FOLDER / "tickets.db"
+SCHEMA = Path(__file__).resolve().with_name("schema.sql")
+# The default database sits at the project root, where it has always been, not inside the package.
+DEFAULT_DATABASE = Path(__file__).resolve().parents[1] / "tickets.db"
 
 
 def connect(database: Path = DEFAULT_DATABASE) -> sqlite3.Connection:
+    """Open a database, creating it and any missing tables, indexes, or columns, with rows returned as mappings."""
     database = Path(database)
     database.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(database, timeout=5)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.executescript((FOLDER / "schema.sql").read_text(encoding="utf-8"))
+        connection.executescript(SCHEMA.read_text(encoding="utf-8"))
         _add_missing_columns(connection)
     except Exception:
         connection.close()
@@ -36,10 +40,7 @@ def _add_missing_columns(connection: sqlite3.Connection) -> None:
 
 
 def initialize(database: Path = DEFAULT_DATABASE) -> Path:
+    """Create or upgrade a database without reading or writing tickets."""
     with closing(connect(database)):
         pass
     return Path(database)
-
-
-if __name__ == "__main__":
-    print(f"Database ready: {initialize()}")

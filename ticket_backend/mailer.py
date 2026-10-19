@@ -1,3 +1,6 @@
+"""SMTP delivery for the notification outbox, configured through TICKETS_SMTP_* environment variables."""
+
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from email import policy
 from email.message import EmailMessage
@@ -7,7 +10,6 @@ import os
 import re
 import smtplib
 import ssl
-from typing import Mapping
 
 
 SECURITY_MODES = ("starttls", "ssl", "none")
@@ -17,7 +19,7 @@ MESSAGE_POLICY = policy.SMTP.clone(cte_type="7bit")
 
 
 class DeliveryError(Exception):
-    pass
+    """The SMTP server could not be reached, rejected the session, or refused a message."""
 
 
 def _loopback(host: str) -> bool:
@@ -31,6 +33,8 @@ def _loopback(host: str) -> bool:
 
 @dataclass(frozen=True)
 class SmtpSettings:
+    """Validated connection settings. The port defaults by security mode, and the password is kept out of repr."""
+
     host: str
     sender: str
     port: int | None = None
@@ -93,6 +97,7 @@ def settings_from_environment(environment: Mapping[str, str] = os.environ) -> Sm
 
 
 def build_message(notification: dict, settings: SmtpSettings) -> EmailMessage:
+    """Turn an outbox row into a plain-text email with stable Message-ID and Auto-Submitted headers."""
     message = EmailMessage(policy=MESSAGE_POLICY)
     message["From"] = settings.sender
     message["To"] = notification["recipient"]

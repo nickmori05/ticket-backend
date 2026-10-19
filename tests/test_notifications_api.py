@@ -7,9 +7,11 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from api import create_app
-from functions import create_ticket, create_token, deliver_notifications, list_notifications, list_tickets
-import tickets
+from ticket_backend import cli
+from ticket_backend.api import create_app
+from ticket_backend.notifications import deliver_notifications, list_notifications
+from ticket_backend.tickets import create_ticket, list_tickets
+from ticket_backend.tokens import create_token
 
 
 class NotificationApiTests(unittest.TestCase):
@@ -71,7 +73,7 @@ class NotificationCliTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         options = ["--json"] if json_mode else []
         with redirect_stdout(output), redirect_stderr(errors):
-            code = tickets.main(["--database", str(self.database), *options, *arguments])
+            code = cli.main(["--database", str(self.database), *options, *arguments])
         return code, output.getvalue(), errors.getvalue()
 
     def test_create_with_email_shows_the_contact_and_queues_a_notification(self):

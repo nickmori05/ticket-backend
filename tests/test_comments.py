@@ -4,10 +4,9 @@ import sqlite3
 import tempfile
 import unittest
 
-from db import connect
-from functions import (
-    TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
-    set_status, ticket_history,
+from ticket_backend.database import connect
+from ticket_backend.tickets import (
+    TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments, set_status, ticket_history,
 )
 
 

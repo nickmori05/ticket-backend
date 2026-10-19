@@ -10,7 +10,8 @@ RUN useradd --uid 10001 --create-home app \
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-COPY db.py functions.py mailer.py tickets.py api.py schema.sql ./
+COPY tickets.py ./
+COPY ticket_backend ./ticket_backend
 USER app
 
 ENTRYPOINT ["python", "tickets.py", "--database", "/data/tickets.db"]
