@@ -26,6 +26,10 @@ class TokenNotFoundError(LookupError):
     pass
 
 
+class NotificationNotFoundError(LookupError):
+    pass
+
+
 def _text(value: str, name: str, maximum: int) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be blank.")
@@ -68,10 +72,10 @@ def _queue_notification(connection: sqlite3.Connection, ticket: sqlite3.Row, eve
     )
 
 
-def _identifier(ticket_id: int) -> int:
-    if type(ticket_id) is not int or ticket_id < 1:
-        raise ValueError("Ticket ID must be a positive integer.")
-    return ticket_id
+def _identifier(identifier: int, name: str = "Ticket ID") -> int:
+    if type(identifier) is not int or identifier < 1:
+        raise ValueError(f"{name} must be a positive integer.")
+    return identifier
 
 
 def create_ticket(
@@ -281,6 +285,52 @@ def list_notifications(
                 (*([status] if status is not None else []), limit, offset),
             )
         ]
+
+
+def count_due_notifications(database: Path = DEFAULT_DATABASE) -> int:
+    """Count pending notifications whose next attempt is due, so a sender can skip connecting when it is zero."""
+    with closing(connect(database)) as connection:
+        return connection.execute(
+            """SELECT COUNT(*) FROM ticket_notifications
+               WHERE status = 'pending' AND next_attempt_at <= CURRENT_TIMESTAMP"""
+        ).fetchone()[0]
+
+
+def retry_notifications(database: Path = DEFAULT_DATABASE, notification_ids: list[int] | None = None) -> list[dict]:
+    """Move failed notifications back to pending with a fresh attempt budget, due immediately.
+
+    With no IDs, every failed notification is requeued. Named IDs must all exist and be failed, or nothing changes.
+    The last error is kept until the next attempt records its own outcome.
+    """
+    if notification_ids is not None:
+        if not isinstance(notification_ids, (list, tuple)) or not notification_ids:
+            raise ValueError("Notification IDs must be a non-empty list.")
+        notification_ids = sorted({_identifier(identifier, "Notification ID") for identifier in notification_ids})
+    with closing(connect(database)) as connection:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if notification_ids is None:
+                notification_ids = [row["id"] for row in connection.execute(
+                    "SELECT id FROM ticket_notifications WHERE status = 'failed' ORDER BY id"
+                )]
+            for identifier in notification_ids:
+                row = connection.execute(
+                    "SELECT status FROM ticket_notifications WHERE id = ?", (identifier,)
+                ).fetchone()
+                if row is None:
+                    raise NotificationNotFoundError(f"Notification #{identifier} was not found.")
+                if row["status"] != "failed":
+                    raise ValueError(f"Notification #{identifier} is {row['status']}; only failed notifications "
+                                     "can be retried.")
+            connection.executemany(
+                """UPDATE ticket_notifications SET status = 'pending', attempts = 0,
+                   next_attempt_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                [(identifier,) for identifier in notification_ids],
+            )
+            return [
+                dict(connection.execute("SELECT * FROM ticket_notifications WHERE id = ?", (identifier,)).fetchone())
+                for identifier in notification_ids
+            ]
 
 
 def deliver_notifications(
