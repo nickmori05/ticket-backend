@@ -28,6 +28,8 @@ class TicketInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     title: str = Field(min_length=1, max_length=120, strict=True)
     message: str = Field(min_length=1, max_length=10_000, strict=True)
+    email: str | None = Field(default=None, max_length=254, strict=True,
+                              description="Optional requester address; queues status notifications.")
 
 
 class StatusInput(BaseModel):
@@ -41,6 +43,7 @@ class TicketOutput(BaseModel):
     title: str
     message: str
     status: Status
+    email: str | None
     created_at: str
 
 
@@ -74,7 +77,7 @@ class StatsOutput(BaseModel):
 
 def create_app(database: Path | None = None) -> FastAPI:
     database = Path(database if database is not None else os.environ.get("TICKETS_DATABASE", DEFAULT_DATABASE))
-    app = FastAPI(title="Ticket Backend", version="0.5.0")
+    app = FastAPI(title="Ticket Backend", version="0.6.0")
 
     @app.exception_handler(TicketNotFoundError)
     async def missing_ticket(_request: Request, error: TicketNotFoundError):
@@ -121,7 +124,7 @@ def create_app(database: Path | None = None) -> FastAPI:
         )] = None,
     ):
         ticket = create_ticket(payload.title, payload.message, database,
-                               idempotency_key=idempotency_key, author=author)
+                               idempotency_key=idempotency_key, author=author, email=payload.email)
         response.headers["Location"] = f"/tickets/{ticket['id']}"
         return ticket
 
