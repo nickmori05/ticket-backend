@@ -1,0 +1,8 @@
+# Tool settings only. The project runs from a checkout; dependencies are pinned in requirements*.txt.
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]
