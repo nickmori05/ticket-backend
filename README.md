@@ -2,452 +2,289 @@
 
 [![Tests](https://github.com/nickmori05/ticket-backend/actions/workflows/tests.yml/badge.svg)](https://github.com/nickmori05/ticket-backend/actions/workflows/tests.yml)
 
-A Python and SQLite ticket tracker with terminal commands and an HTTP API.
-Submit a ticket, retrieve it by ID, track its status changes, and keep
-working notes as comments. Tickets with a requester email queue a notification
-for each status change, which `tickets.py send-notifications` delivers over SMTP.
-The API requires a token created from the terminal.
-Requires Python 3.10 or later. The terminal commands use the standard library; the
-optional API uses FastAPI and Uvicorn.
+A support-ticket tracker built on Python and SQLite, with a command line and an
+HTTP API that share one database. Tickets move between `open`, `in_progress`, and
+`closed` with a recorded history, collect comments, and can notify the person who
+filed them by email.
+
+- **CLI** using only the standard library: create, search, and update tickets, with
+  text or JSON output and stable exit codes.
+- **HTTP API** built with FastAPI, protected by bearer tokens that are stored hashed
+  and managed from the terminal.
+- **Safe retries**: an optional idempotency key makes a repeated submission return the
+  original ticket instead of creating a duplicate.
+- **Email notifications** through a transactional outbox, delivered over SMTP with
+  retries and backoff.
+- **Docker Compose** setup that runs the API and CLI against one persistent volume.
+
+Requires Python 3.10 or later.
+
+## Quick start
+
+The CLI needs no installation. The database (`tickets.db` in the project folder)
+is created on first use.
 
 ```sh
 git clone https://github.com/nickmori05/ticket-backend.git
 cd ticket-backend
-```
-
-```sh
-python3 db.py
-python3 submit.py
-python3 retrieve.py
-```
-
-SQLite assigns each ticket its ID. Titles and messages are validated before
-writing, and SQL parameters keep user input separate from query instructions.
-The database is created automatically when a command first needs it.
-
-`tickets.db` lives beside the Python files and is excluded from Git. Existing
-tickets survive repeated database initialization. Optional submission keys
-prevent retries from creating duplicate tickets.
-
-## Ticket workflow
-
-```sh
-python3 tickets.py create --title "Login issue" --message "Cannot sign in" --email pat@example.com
-python3 tickets.py show 1
-python3 tickets.py list --status open --search login
+python3 tickets.py create --title "Login issue" --message "Cannot sign in"
 python3 tickets.py status 1 in_progress --note "Investigating"
-python3 tickets.py status 1 closed --note "Fixed the login form"
 python3 tickets.py history 1
-python3 tickets.py comment 1 "Asked the customer for a screenshot"
-python3 tickets.py comments 1
-python3 tickets.py stats
-python3 tickets.py outbox --status pending
-python3 tickets.py send-notifications
-python3 tickets.py retry-notifications
-python3 tickets.py token create alice
-python3 tickets.py token list
-python3 tickets.py token revoke alice
 ```
 
-Use the ID returned by `create`. Omit `--title` or `--message` for terminal
-prompts. Statuses are `open`, `in_progress`, and `closed`; closed tickets can be
-reopened. Setting the current status again does not add a duplicate event.
-
-Status updates and their history entries are committed in the same transaction.
-Tickets that existed before history was added retain their data and start
-recording history with their next status change.
-
-Each history entry records who made it. Tickets created and status changes made
-over HTTP record the name of the API token used; terminal changes have no author
-and display as `local` in `history`. Entries recorded before attribution existed
-also have no author.
-
-Comments are free-form notes of up to 5000 characters, listed oldest first.
-They can be added in any status, including after a ticket is closed, and never
-change its status or history. Comments added over HTTP record the name of the
-API token that wrote them; terminal comments have no author and display as `local`.
-
-`--email` is optional and is never prompted for; see [Notifications](#notifications).
-
-Lists are newest first, with `--limit` (1–100, default 20) and `--offset`.
-Search matches literal text in the title or message. `%` is treated as text.
-
-Use global options before the command:
-
-```sh
-python3 tickets.py --database /tmp/ticket-demo.db --json create --title "Demo" --message "Example ticket"
-python3 tickets.py --database /tmp/ticket-demo.db --json list
-```
-
-JSON output goes to stdout; errors go to stderr. JSON creation requires both
-fields and never prompts. Exit codes are `0` for success, `1` for a missing
-ticket, token, or notification, `2` for invalid input, configuration, or a storage
-error, `3` for a conflicting submission key, `4` when the SMTP server cannot be
-reached or rejects the session, and `130` for cancellation.
-
-## Run with Docker
-
-Start the API with a persistent database:
-
-```sh
-docker compose up --build -d api
-curl http://127.0.0.1:8000/health
-docker compose run --rm tickets token create alice
-```
-
-The API is available at `http://127.0.0.1:8000`, with interactive docs at `/docs`.
-Ticket endpoints need a token from the Docker database, as created above; a token
-from the local `tickets.db` will not work there. Set `TICKETS_PORT` to change the
-host port if 8000 is already occupied. Port publishing is restricted to loopback. The API and terminal service share the
-same named data volume.
-
-Run terminal commands against that database:
-
-```sh
-docker compose build
-docker compose run --rm tickets create
-docker compose run --rm tickets show 1
-docker compose run --rm tickets status 1 closed --note "Resolved"
-docker compose run --rm tickets history 1
-```
-
-Each terminal command starts a container and removes it when finished. A named volume
-retains `/data/tickets.db` between runs. Docker's database is separate from the
-local `tickets.db`; use the ID printed by your Docker submission. The image
-runs as a non-root user and contains only the application code and schema.
-
-These Docker commands run the terminal interface. Use `docker compose run`
-for one-off commands. `docker compose down` keeps the data volume. Adding `--volumes`
-to that command deletes the Docker database.
-
-See [Docker's volume documentation](https://docs.docker.com/engine/storage/volumes/)
-for how container storage persists.
-
-## HTTP API
+To run the API, install its dependencies and create a token:
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m uvicorn api:app --host 127.0.0.1 --port 8000
+python tickets.py token create alice
+python -m uvicorn ticket_backend.api:app --host 127.0.0.1 --port 8000
 ```
 
-Every endpoint except `/health` and the docs requires a bearer token. Create one
-in another terminal against the same database. It is printed once; store it
-somewhere safe:
+In a second terminal, use the printed token, which is shown only once:
 
 ```sh
-python3 tickets.py token create alice
-export TICKETS_TOKEN=tkt_...   # the value printed above
-```
-
-Open [the interactive API docs](http://127.0.0.1:8000/docs) and use **Authorize**,
-or call the API with `curl`:
-
-```sh
-curl -i http://127.0.0.1:8000/tickets \
-  -H "Authorization: Bearer $TICKETS_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"title":"Login issue","message":"Cannot sign in","email":"pat@example.com"}'
+export TICKETS_TOKEN=tkt_...   # the token printed above
 curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1
-curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
-  -H "Authorization: Bearer $TICKETS_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"status":"closed","note":"Fixed"}'
-curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1/history
-curl -i http://127.0.0.1:8000/tickets/1/comments \
-  -H "Authorization: Bearer $TICKETS_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"body":"Asked the customer for a screenshot"}'
-curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1/comments
 ```
 
-Use the ID returned by the POST request. Successful creation returns HTTP 201
-and a `Location` header. Both interfaces use the same storage functions and
-default database. Set `TICKETS_DATABASE` when starting Uvicorn to choose another
-file; an absolute path avoids dependence on the working directory.
+Interactive API docs are at <http://127.0.0.1:8000/docs>; use **Authorize** to
+enter the token.
+
+## Command line
+
+Run `python3 tickets.py COMMAND --help` for every option.
+
+| Command | Purpose |
+| --- | --- |
+| `create [--title T] [--message M] [--email E] [--idempotency-key K]` | Submit a ticket; prompts for a missing title or message |
+| `show ID` | Show one ticket |
+| `list [--status S] [--search TEXT] [--limit N] [--offset N]` | List tickets, newest first |
+| `status ID STATUS [--note TEXT]` | Change status to `open`, `in_progress`, or `closed` |
+| `history ID` | Show recorded status changes |
+| `comment ID BODY` / `comments ID` | Add a comment / list comments, oldest first |
+| `stats` | Count tickets by status |
+| `outbox [--status S] [--limit N] [--offset N]` | List queued notifications, oldest first |
+| `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
+| `retry-notifications [ID ...]` | Requeue failed notifications |
+| `token create NAME` / `token list` / `token revoke NAME` | Manage API tokens |
+
+Global options go before the command: `--database PATH` selects another SQLite
+file, and `--json` prints machine-readable output.
+
+```sh
+python3 tickets.py --database /tmp/ticket-demo.db --json create --title "Demo" --message "Example ticket"
+python3 tickets.py --database /tmp/ticket-demo.db list --status open --search demo
+```
+
+Output goes to stdout and errors to stderr. JSON mode never prompts, so `create`
+then needs both `--title` and `--message`.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Ticket, token, or notification not found |
+| `2` | Invalid input or configuration, or a storage error |
+| `3` | Idempotency key already used for different content |
+| `4` | SMTP server unreachable, or it rejected STARTTLS or the login |
+| `130` | Cancelled |
+
+Titles are up to 120 characters, messages up to 10,000, comments up to 5,000, and
+status notes up to 500; surrounding whitespace is trimmed. Lists take `--limit`
+from 1 to 100 (default 20) and `--offset`. Search matches literal, case-insensitive
+text in the title or message, so `%` and `_` are not wildcards. Closed tickets can be
+reopened, and setting the current status again records nothing.
+
+## HTTP API
+
+Every endpoint except `/health` and the docs requires `Authorization: Bearer TOKEN`.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /health` | Process health; does not check database availability or need a token |
-| `POST /tickets` | Create a ticket from JSON `title`, `message`, and optional `email`, attributed to the token |
+| `GET /health` | Process health; does not check the database or need a token |
+| `POST /tickets` | Create from JSON `title`, `message`, and optional `email`; returns 201 and `Location` |
 | `GET /tickets` | List with optional `status`, `search`, `limit`, and `offset` |
 | `GET /tickets/{id}` | Retrieve a ticket |
-| `PATCH /tickets/{id}/status` | Change status with an optional note, attributed to the token |
-| `GET /tickets/{id}/history` | Read recorded changes, each with its `author` |
-| `POST /tickets/{id}/comments` | Add a comment from JSON `body`, attributed to the token; returns 201 |
-| `GET /tickets/{id}/comments` | Read comments, oldest first |
-| `GET /stats` | Count tickets by status |
-
-Missing, unknown, or revoked tokens return 401 before any ticket is read. Missing
-tickets return 404, conflicting submission keys return 409, invalid request fields
-return 422, and storage failures return 503 without exposing local database paths.
-
-## API tokens
-
-Tokens are managed only from the terminal, because anyone who can run
-`tickets.py` can already read and write the database directly. Each token has a
-unique name of 1-64 ASCII letters, digits, dots, underscores, or hyphens. The
-database stores a SHA-256 hash of each token, never the token itself, so a lost
-token cannot be recovered: revoke it and create one with a new name. Revocation
-takes effect on the next request. Names are never reused, so comment and status-change
-authors stay unambiguous after a token is revoked.
-
-Every token has the same full access to tickets. There are no roles, expiry, or
-rate limits, and tokens travel in plain text over HTTP, so keep the API bound to
-loopback or put it behind HTTPS before sharing it.
-
-## Notifications
-
-A ticket can be created with an optional requester email, given as `--email` or
-the JSON `email` field. It must be an ASCII address such as `pat@example.com`, up
-to 254 characters, without spaces, commas, quotes, or angle brackets. It is returned
-with the ticket and cannot be changed after creation.
-
-For a ticket with an email, every history entry queues one notification in the
-`ticket_notifications` outbox, in the same transaction as the entry itself:
-creation queues a "received" message, and each status change queues a message with
-the old and new status and the note. Setting the current status again, idempotent
-replays, and comments queue nothing. The subject and body are written when the
-notification is queued, and the title is collapsed onto one line in the subject.
-
-```sh
-python3 tickets.py outbox
-python3 tickets.py --json outbox --status failed --limit 50
-```
-
-`outbox` lists notifications oldest first, with an optional `--status` of
-`pending`, `sent`, or `failed`, plus `--limit` and `--offset`. Each row shows its
-recipient, subject, attempt count, and last delivery error.
-
-### Sending notifications
-
-`send-notifications` delivers due notifications over SMTP using only the standard
-library. Configure it with environment variables:
-
-| Variable | Meaning |
-| --- | --- |
-| `TICKETS_SMTP_HOST` | Mail server host name or IP address (required) |
-| `TICKETS_SMTP_FROM` | Sender, such as `support@example.com` or `Support <support@example.com>` (required) |
-| `TICKETS_SMTP_SECURITY` | `starttls` (default), `ssl` for implicit TLS, or `none` |
-| `TICKETS_SMTP_PORT` | Defaults to 587 for `starttls`, 465 for `ssl`, and 25 for `none` |
-| `TICKETS_SMTP_USERNAME`, `TICKETS_SMTP_PASSWORD` | Optional login; set both or neither |
-| `TICKETS_SMTP_TIMEOUT` | Seconds to wait for the server, default 10 |
-
-```sh
-export TICKETS_SMTP_HOST=smtp.example.com
-export TICKETS_SMTP_FROM="Support <support@example.com>"
-export TICKETS_SMTP_USERNAME=support TICKETS_SMTP_PASSWORD=...
-python3 tickets.py send-notifications
-python3 tickets.py --json send-notifications --limit 50 --max-attempts 3 --retry-delay 300
-```
-
-Each run sends at most `--limit` due notifications (1–100, default 20) over one
-connection and prints how many were sent, scheduled for retry, or marked failed.
-TLS certificates are verified against Python's default trust store. Credentials are
-refused with `none` unless the server is on localhost, so a password is never sent in
-plain text across a network. Settings are checked and the server is reached before any
-notification is claimed: missing or invalid settings exit with code 2, and an
-unreachable server, failed STARTTLS, or rejected login exits with code 4, leaving the
-outbox untouched. A run with nothing due exits without connecting.
-
-The command sends one batch and exits, so schedule it with cron, a systemd timer, or a
-similar runner. For example, every minute with crontab:
-
-```text
-* * * * * cd /path/to/ticket-backend && TICKETS_SMTP_HOST=... TICKETS_SMTP_FROM=... python3 tickets.py send-notifications
-```
-
-With Docker, pass the settings to the terminal service:
-
-```sh
-docker compose run --rm -e TICKETS_SMTP_HOST=smtp.example.com \
-  -e TICKETS_SMTP_FROM=support@example.com tickets send-notifications
-```
-
-Messages are plain text with the queued subject and body, a `Message-ID` that stays
-the same for every attempt at one notification, and `Auto-Submitted: auto-generated`
-so mail systems do not send auto-replies back.
-
-### Retries
-
-A message the server refuses, or a connection that drops mid-message, is recorded on
-that notification and the run continues with the next one on a fresh connection.
-`send-notifications` uses `functions.deliver_notifications(send, database)`, which
-can also drive other senders: it calls `send(notification)` for each due pending
-notification, oldest first. A call that returns marks the notification `sent`; one
-that raises records the error and schedules a retry after `--retry-delay` seconds
-(default 60), doubling each attempt up to a day. After `--max-attempts` (default 5)
-the notification is marked `failed` and is not retried. Each attempt is counted and
-its retry scheduled before sending, so a crash mid-send or a second sender running
-at the same time waits for the delay instead of sending at once. Delivery is still at
-least once: if the process stops after sending but before recording success, that
-message is sent again later with the same `Message-ID`.
-
-Once the cause of a failure is fixed, requeue failed notifications:
-
-```sh
-python3 tickets.py outbox --status failed
-python3 tickets.py retry-notifications          # every failed notification
-python3 tickets.py retry-notifications 4 7      # only these
-```
-
-Requeued notifications become `pending`, due immediately, with their attempt count
-reset so they get the full number of attempts again. The last error stays visible
-until the next attempt. Naming a notification that does not exist exits with code 1,
-and naming one that is not `failed` exits with code 2; in both cases nothing changes.
-
-Notification emails are visible to every API token holder through the ticket and are
-stored in plain text in the database. The outbox is managed from the terminal only;
-there is no HTTP endpoint for it.
-
-## Retry a submission
-
-Choose one key for each new submission and keep it for retries. These examples
-use `login-demo-1`; use a fresh random identifier, such as a UUID, for real submissions.
-
-```sh
-python3 tickets.py create --title "Login issue" --message "Cannot sign in" \
-  --idempotency-key login-demo-1
-```
-
-Running that command again returns the same ticket. The HTTP equivalent is:
+| `PATCH /tickets/{id}/status` | Change status from JSON `status` and optional `note` |
+| `GET /tickets/{id}/history` | Recorded status changes, each with its `author` |
+| `POST /tickets/{id}/comments` | Add a comment from JSON `body`; returns 201 |
+| `GET /tickets/{id}/comments` | Comments, oldest first |
+| `GET /stats` | Ticket counts by status |
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
   -H "Authorization: Bearer $TICKETS_TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: login-demo-1' \
-  -d '{"title":"Login issue","message":"Cannot sign in"}'
+  -d '{"title":"Login issue","message":"Cannot sign in","email":"pat@example.com"}'
+curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"closed","note":"Fixed"}'
 ```
 
-The CLI and API share keys when they use the same database. Docker uses its own
-data volume, so local and Docker submissions do not share keys by default.
+A missing, unknown, or revoked token returns 401 before any ticket is read. A
+missing ticket returns 404, a reused idempotency key with different content 409,
+invalid fields 422, and a storage failure 503 without exposing file paths. Unknown
+JSON fields are rejected. Ticket creation, status changes, and comments record the
+name of the token that made them.
 
-| Submission | Result |
-| --- | --- |
-| New key | Create a ticket and save the original response |
-| Same key and same content | Return the original ticket JSON; HTTP keeps 201 and the same `Location` |
-| Same key, different title or message | HTTP 409 or CLI exit code 3; existing data stays unchanged |
-| No key | Create a new ticket every time |
+## Configuration
 
-Keys are case-sensitive and accept 1-128 ASCII letters, digits, dots, underscores,
-or hyphens. Title and message comparisons use their validated, whitespace-trimmed
-values. An invalid request does not reserve its key.
+| Variable | Used by | Meaning |
+| --- | --- | --- |
+| `TICKETS_DATABASE` | API | SQLite file; defaults to `tickets.db` in the project folder. The CLI uses `--database`. |
+| `TICKETS_PORT` | Docker Compose | Host port for the API, default 8000 |
+| `TICKETS_SMTP_HOST` | `send-notifications` | Mail server host name or IP address (required) |
+| `TICKETS_SMTP_FROM` | `send-notifications` | Sender, such as `Support <support@example.com>` (required) |
+| `TICKETS_SMTP_SECURITY` | `send-notifications` | `starttls` (default), `ssl` for implicit TLS, or `none` |
+| `TICKETS_SMTP_PORT` | `send-notifications` | Defaults to 587, 465, or 25 to match the security mode |
+| `TICKETS_SMTP_USERNAME`, `TICKETS_SMTP_PASSWORD` | `send-notifications` | Optional login; set both or neither |
+| `TICKETS_SMTP_TIMEOUT` | `send-notifications` | Seconds to wait for the server, default 10 |
 
-A replay returns the original creation response, even if the ticket has since
-been closed. Use `show` or `GET /tickets/{id}` for its current state. Replays never
-reopen tickets or add history entries. The client must retain the key and content
-after an uncertain result; generating a new key on every retry defeats this protection.
+## Email notifications
 
-Submission records survive process and container restarts and have no automatic
-expiry. They are global within this local database rather than scoped to an API
-token, so any token holder can replay another caller's submission with the same key
-and content. Scope keys to tokens and define a retention policy before giving tokens
-to separate teams. Keys are not credentials and do not add automatic retries.
+A ticket created with an email (`--email` or the JSON `email` field) queues one
+notification for each history entry: a "received" message on creation, and a message
+with the old and new status and the note on each status change. Emails must be plain
+ASCII addresses without spaces, commas, quotes, or angle brackets, and cannot be
+changed after creation. Comments, unchanged statuses, and idempotent replays queue
+nothing.
 
-## Tests
-
-```sh
-python -m pip install -r requirements-dev.txt
-python -m unittest discover -s tests -v
-```
-
-Tests use temporary databases and cover persistence, existing data, assigned
-IDs, SQL-shaped input, validation, missing tickets, concurrent submissions,
-transaction rollback, search, pagination, and terminal/JSON workflows.
-Submission tests cover concurrent retries and conflicts, rollback of all three
-records, replay after status changes, and compatibility with existing databases.
-API tests exercise HTTP responses, body validation, shared persistence, status
-history, filters, and storage errors without contacting external services.
-Comment tests cover validation, ordering, isolation between tickets, rollback,
-existing databases, and the CLI and HTTP interfaces. Token tests cover hashed
-storage, revocation, name validation, the 401 response on every ticket route,
-comment attribution, older comment tables gaining an author column, and the CLI
-token commands. Status attribution tests cover authors on creation and status
-changes from each interface, rejected and unchanged updates writing nothing, revoked
-tokens, a replay by another token, older history tables gaining an author column,
-and the `history` output. Notification tests cover email validation, one queued
-message per history entry, unchanged statuses and replays queuing nothing, rollback
-of the ticket or status change when queuing fails, older tables gaining the email
-column, delivery success, recorded failures, retry delays, permanent failure after
-the maximum attempts, a concurrent sender skipping a claimed message, and the
-`outbox` command and HTTP `email` field. SMTP tests run the sender and the
-`send-notifications` command against a small SMTP server on 127.0.0.1 inside the
-test process (`tests/smtp_stub.py`), never a real mail server. They cover settings
-validation, message headers and encoding, delivery over one connection, a refused
-recipient, a dropped connection, login, unreachable servers, failed STARTTLS, and
-rejected logins leaving the outbox untouched, and `retry-notifications` requeueing all
-or named failed notifications without changing anything on an invalid request.
-
-Run the Docker integration check separately:
-
-```sh
-python3 scripts/smoke_docker.py
-```
-
-It builds the image, checks that the API and CLI share data, recreates the API
-container and retrieves a saved ticket, and checks non-root execution. It also
-retries an HTTP submission after recreation and from a separate CLI container,
-checking that ticket and history counts stay unchanged. It creates an API token
-with the CLI container, checks that the API rejects requests without it, attributes
-HTTP status changes and an HTTP comment to it, checks that the CLI outbox shows the
-notifications queued by an HTTP ticket with an email and that retries queue no more.
-It checks that `send-notifications` reports an unreachable SMTP server without claiming
-anything, then delivers both notifications through the image to the test SMTP server
-running inside the same container, and checks that revoking the token from the CLI takes effect. It uses
-a random loopback port and removes only its temporary Compose project and
-volume. GitHub Actions runs this check on Linux alongside
-the Python suite on versions 3.10, 3.11, and 3.14.
-
-## How it works
+`send-notifications` sends one batch of due notifications over a single SMTP
+connection and prints how many were sent, scheduled for retry, or marked failed.
+It sends one batch and exits, so run it on a schedule, for example from cron:
 
 ```text
-Terminal input or CLI arguments      HTTP requests
-           |                              |
-       tickets.py                       api.py
-           |                              |
-           +------------------------------+
-      functions.py         validation, queries, transactions
-           |               (mailer.py sends the outbox over SMTP)
-           |
-         db.py             connections and schema initialization
-           |
-       SQLite file         tickets, ticket_events, ticket_submissions,
-                     ticket_comments, api_tokens, ticket_notifications
+* * * * * cd /path/to/ticket-backend && TICKETS_SMTP_HOST=smtp.example.com TICKETS_SMTP_FROM=support@example.com python3 tickets.py send-notifications
 ```
 
-`submit.py` and `retrieve.py` retain the original prompt-based entry points.
-SQLite assigns IDs during insertion, avoiding a separate read-and-increment
-operation. Status changes acquire the write transaction before reading the
-old status, so the update and history describe the same change.
+Settings are validated and the server is reached before any notification is
+claimed, so a misconfiguration or an outage exits with code 2 or 4 and uses up no
+retry attempts. A run with nothing due does not connect. TLS certificates are
+verified, and credentials are refused with `security=none` unless the server is on
+localhost. A recipient the server refuses, or a connection that drops mid-message, is
+recorded on that notification, and the next message uses a fresh connection.
 
-Keyed creation acquires a write transaction before checking the submission key.
-The key is a database primary key, and the ticket, initial history entry, and
-saved response commit together. Concurrent attempts serialize through SQLite;
-if a writer cannot acquire the lock within the connection's five-second timeout,
-the existing storage-error response applies. Failed transactions leave no
-partially created submission.
+A failed attempt is retried after `--retry-delay` seconds (default 60), doubling each
+time up to a day. After `--max-attempts` (default 5) the notification is marked
+`failed`. Once the cause is fixed, `retry-notifications` moves every failed
+notification, or only the IDs given, back to `pending` with a fresh attempt budget.
+Naming a missing notification exits with code 1, and naming one that is not `failed`
+exits with code 2, without changing anything.
 
-## Scope
+```sh
+python3 tickets.py outbox --status failed
+python3 tickets.py retry-notifications 4 7
+```
 
-This is a local support-ticket tracker. It queues notification emails and sends them
-in batches when `send-notifications` runs, and API tokens identify callers without
-separating their permissions.
-SQLite serializes writers, so this design targets local workflows rather than a
-busy shared service. Initialization adds missing tables, indexes, the `author`
-columns on comments and history, and the `email` column on tickets; it does not
-modify existing column definitions. Existing tickets are preserved, and history is
-not reconstructed for older work.
+Messages are plain text with `Auto-Submitted: auto-generated` and a `Message-ID` that
+stays the same on every attempt at one notification.
 
-Comments written before tokens existed, and comments added from the terminal,
-have no author. The same applies to status history. Authors are token names, not
-people; anyone holding a token acts under its name. Comments cannot be edited
-or deleted.
+## Docker
 
-Tickets created before notifications existed have no email and never queue any,
-and earlier history is not queued retroactively. There is no unsubscribe, outbox
-retention, HTML mail, or bounce handling; the sender does not run on its own schedule;
-and a refused recipient is retried like any other failure rather than failed at once.
+```sh
+docker compose up --build -d api
+docker compose run --rm tickets token create alice
+curl http://127.0.0.1:8000/health
+docker compose run --rm tickets create --title "Login issue" --message "Cannot sign in"
+docker compose run --rm -e TICKETS_SMTP_HOST=smtp.example.com \
+  -e TICKETS_SMTP_FROM=support@example.com tickets send-notifications
+```
 
-Next steps: add an unsubscribe link and a retention policy for sent notifications.
+The `api` and `tickets` services share a named volume holding `/data/tickets.db`,
+which is separate from the local `tickets.db`, so tokens and ticket IDs differ
+between them. The API is published on loopback only, and the image runs as a
+non-root user. `docker compose down` keeps the volume; `docker compose down --volumes`
+deletes the Docker database.
+
+## Design
+
+```text
+tickets.py                  CLI launcher (python3 tickets.py ...)
+ticket_backend/
+  cli.py                    argument parsing, text and JSON output, exit codes
+  api.py                    FastAPI app, request and response models, token check
+  tickets.py                tickets, status history, comments, statistics
+  tokens.py                 token creation, revocation, and authentication
+  notifications.py          outbox queries, delivery, and retries
+  mailer.py                 SMTP settings and sender
+  validation.py             input checks shared by the storage modules
+  database.py, schema.sql   connections and schema upgrades
+tests/                      unit tests and the SMTP test server
+scripts/smoke_docker.py     Docker integration check
+```
+
+The CLI and the API are thin layers over the same storage functions, so both apply
+the same validation and transactions to the same database.
+
+**Transactions.** Every write that touches more than one row runs in one SQLite
+transaction. Status changes take the write lock (`BEGIN IMMEDIATE`) before reading
+the current status, so the update, its history entry, and its notification always
+agree. SQLite assigns IDs on insert, and writers wait up to five seconds for the lock
+before failing with a storage error.
+
+**Idempotent submissions.** A key (`--idempotency-key` or the `Idempotency-Key`
+header, 1–128 ASCII letters, digits, dots, underscores, or hyphens) is a primary key
+in `ticket_submissions`, saved in the same transaction as the ticket together with
+the original response. Reusing a key with the same title, message, and email returns
+that response, with 201 and the same `Location` over HTTP, even if the ticket has
+since changed. Different content returns 409 or exit code 3, and an invalid request
+does not reserve its key. The CLI and API share keys when they share a database.
+
+**Authentication.** Tokens are 256-bit random values. Only their SHA-256 hashes are
+stored, so a lost token cannot be recovered, only revoked and replaced under a new
+name. Revocation applies to the next request. Tokens are created and revoked only
+from the terminal, because anyone who can run the CLI can already open the database.
+
+**Outbox.** Notifications are written in the same transaction as the history entry
+they describe, so one exists exactly when the other does, and delivery happens later
+and separately. Each attempt is counted and its retry scheduled before sending, so a
+crash mid-send or a second sender waits for the retry delay instead of sending again
+at once. Delivery is at least once: a process that stops after sending but before
+recording success sends that message again, with the same `Message-ID`.
+
+**Schema upgrades.** Each connection applies `schema.sql`, which creates any missing
+tables and indexes, then adds columns introduced since a database was created.
+Existing rows and column definitions are never rewritten, so databases from earlier
+versions keep working.
+
+## Testing
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+ruff check .
+python scripts/smoke_docker.py   # needs Docker
+```
+
+The unit tests use temporary databases and cover validation, persistence, schema
+upgrades from older databases, transaction rollback, concurrent writers, idempotent
+retries, token authentication, the CLI and HTTP interfaces, and notification
+delivery. SMTP tests talk to a small SMTP server on 127.0.0.1 inside the test process
+(`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
+builds the image and checks that the API and CLI containers share data, that tickets,
+tokens, and idempotency keys survive container recreation, that the image runs as a
+non-root user, and that `send-notifications` delivers through the image. It uses a
+random loopback port and removes only its own Compose project and volume. GitHub
+Actions runs ruff, the unit tests on Python 3.10, 3.11, and 3.14, and the Docker smoke
+test.
+
+## Limitations
+
+- SQLite serializes writers, so this suits a small team or local use, not a busy
+  shared service.
+- Every token has full access: there are no roles, expiry, or rate limits. Tokens
+  travel in plain text over HTTP, so keep the API on loopback or behind HTTPS.
+- Authors are token names, not people, and terminal changes have no author (shown as
+  `local`). Entries from before attribution existed have none either.
+- Idempotency keys are global rather than scoped to a token, and never expire.
+- Comments cannot be edited or deleted, and a ticket's email cannot be changed.
+- Requester emails are stored in plain text and visible to every token holder. The
+  outbox has no HTTP endpoint.
+- Notifications have no unsubscribe, bounce handling, HTML version, or retention
+  policy, and `send-notifications` needs an external scheduler. A permanently refused
+  recipient is retried like any other failure.
