@@ -7,9 +7,10 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from api import create_app
-from functions import authenticate, create_ticket, create_token, list_comments, list_tickets, revoke_token
-import tickets
+from ticket_backend import cli
+from ticket_backend.api import create_app
+from ticket_backend.tickets import create_ticket, list_comments, list_tickets
+from ticket_backend.tokens import authenticate, create_token, revoke_token
 
 
 class TokenApiTests(unittest.TestCase):
@@ -95,7 +96,7 @@ class TokenCliTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         options = ["--json"] if json_mode else []
         with redirect_stdout(output), redirect_stderr(errors):
-            code = tickets.main(["--database", str(self.database), *options, *arguments])
+            code = cli.main(["--database", str(self.database), *options, *arguments])
         return code, output.getvalue(), errors.getvalue()
 
     def test_json_token_lifecycle(self):

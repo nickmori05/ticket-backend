@@ -6,8 +6,9 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from api import create_app
-from functions import create_ticket, create_token, get_ticket, list_tickets, ticket_history
+from ticket_backend.api import create_app
+from ticket_backend.tickets import create_ticket, get_ticket, list_tickets, ticket_history
+from ticket_backend.tokens import create_token
 
 
 class ApiTests(unittest.TestCase):
@@ -114,7 +115,7 @@ class ApiTests(unittest.TestCase):
         directory = self.database.with_name("directory")
         directory.mkdir()
         with TestClient(create_app(directory), headers=self.headers) as broken:
-            with self.assertLogs("api", level="ERROR"):
+            with self.assertLogs("ticket_backend.api", level="ERROR"):
                 response = broken.get("/tickets")
             self.assertEqual(response.status_code, 503)
             self.assertEqual(response.json(), {"detail": "Ticket storage is unavailable."})

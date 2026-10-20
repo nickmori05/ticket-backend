@@ -7,9 +7,10 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from api import create_app
-from functions import add_comment, create_ticket, create_token, get_ticket, list_comments
-import tickets
+from ticket_backend import cli
+from ticket_backend.api import create_app
+from ticket_backend.tickets import add_comment, create_ticket, get_ticket, list_comments
+from ticket_backend.tokens import create_token
 
 
 class CommentApiTests(unittest.TestCase):
@@ -50,7 +51,7 @@ class CommentApiTests(unittest.TestCase):
         broken = TestClient(create_app(self.database.with_name("directory")), headers=self.headers)
         self.addCleanup(broken.close)
         self.database.with_name("directory").mkdir()
-        with self.assertLogs("api", level="ERROR"):
+        with self.assertLogs("ticket_backend.api", level="ERROR"):
             response = broken.post("/tickets/1/comments", json={"body": "Body"})
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {"detail": "Ticket storage is unavailable."})
@@ -67,7 +68,7 @@ class CommentCliTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         options = ["--json"] if json_mode else []
         with redirect_stdout(output), redirect_stderr(errors):
-            code = tickets.main(["--database", str(self.database), *options, *arguments])
+            code = cli.main(["--database", str(self.database), *options, *arguments])
         return code, output.getvalue(), errors.getvalue()
 
     def test_json_comment_workflow(self):

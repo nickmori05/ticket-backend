@@ -5,11 +5,9 @@ import sqlite3
 import tempfile
 import unittest
 
-from db import connect
-from functions import (
-    IdempotencyConflictError, create_ticket, deliver_notifications, get_ticket, list_notifications, set_status,
-    ticket_history,
-)
+from ticket_backend.database import connect
+from ticket_backend.notifications import deliver_notifications, list_notifications
+from ticket_backend.tickets import IdempotencyConflictError, create_ticket, get_ticket, set_status, ticket_history
 
 
 class NotificationOutboxTests(unittest.TestCase):

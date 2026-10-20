@@ -10,12 +10,13 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 SEND_THROUGH_STUB = """
-import contextlib, io, json, os, tickets
+import contextlib, io, json, os
+from ticket_backend import cli
 with SmtpStub() as stub:
     os.environ.update(TICKETS_SMTP_HOST="127.0.0.1", TICKETS_SMTP_PORT=str(stub.port))
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        code = tickets.main(["--database", "/data/tickets.db", "--json", "send-notifications"])
+        code = cli.main(["--database", "/data/tickets.db", "--json", "send-notifications"])
 print(json.dumps({"code": code, "counts": json.loads(output.getvalue()),
                   "recipients": [recipients for _sender, recipients, _data in stub.messages]}))
 """

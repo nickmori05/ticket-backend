@@ -4,11 +4,9 @@ import sqlite3
 import tempfile
 import unittest
 
-from db import connect
-from functions import (
-    TokenNotFoundError, add_comment, authenticate, create_ticket, create_token, get_ticket,
-    list_comments, list_tokens, revoke_token,
-)
+from ticket_backend.database import connect
+from ticket_backend.tickets import add_comment, create_ticket, get_ticket, list_comments
+from ticket_backend.tokens import TokenNotFoundError, authenticate, create_token, list_tokens, revoke_token
 
 
 class TokenTests(unittest.TestCase):
