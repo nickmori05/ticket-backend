@@ -9,8 +9,8 @@ filed them by email.
 
 - **CLI** using only the standard library: create, search, and update tickets, with
   text or JSON output and stable exit codes.
-- **HTTP API** built with FastAPI, protected by bearer tokens that are stored hashed
-  and managed from the terminal.
+- **HTTP API** built with FastAPI, protected by bearer tokens that are stored hashed,
+  limited to scopes, optionally expiring, and managed from the terminal.
 - **Safe retries**: an optional idempotency key makes a repeated submission return the
   original ticket instead of creating a duplicate.
 - **Email notifications** through a transactional outbox, delivered over SMTP with
@@ -68,7 +68,8 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `outbox [--status S] [--limit N] [--offset N]` | List queued notifications, oldest first |
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
 | `retry-notifications [ID ...]` | Requeue failed notifications |
-| `token create NAME` / `token list` / `token revoke NAME` | Manage API tokens |
+| `token create NAME [--scope S ...] [--expires-in DAYS]` | Create an API token, shown once |
+| `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
 
 Global options go before the command: `--database PATH` selects another SQLite
 file, and `--json` prints machine-readable output.
@@ -100,17 +101,17 @@ reopened, and setting the current status again records nothing.
 
 Every endpoint except `/health` and the docs requires `Authorization: Bearer TOKEN`.
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /health` | Process health; does not check the database or need a token |
-| `POST /tickets` | Create from JSON `title`, `message`, and optional `email`; returns 201 and `Location` |
-| `GET /tickets` | List with optional `status`, `search`, `limit`, and `offset` |
-| `GET /tickets/{id}` | Retrieve a ticket |
-| `PATCH /tickets/{id}/status` | Change status from JSON `status` and optional `note` |
-| `GET /tickets/{id}/history` | Recorded status changes, each with its `author` |
-| `POST /tickets/{id}/comments` | Add a comment from JSON `body`; returns 201 |
-| `GET /tickets/{id}/comments` | Comments, oldest first |
-| `GET /stats` | Ticket counts by status |
+| Endpoint | Scope | Purpose |
+| --- | --- | --- |
+| `GET /health` | none | Process health; does not check the database or need a token |
+| `POST /tickets` | `tickets:write` | Create from JSON `title`, `message`, and optional `email`; returns 201 and `Location` |
+| `GET /tickets` | `tickets:read` | List with optional `status`, `search`, `limit`, and `offset` |
+| `GET /tickets/{id}` | `tickets:read` | Retrieve a ticket |
+| `PATCH /tickets/{id}/status` | `tickets:write` | Change status from JSON `status` and optional `note` |
+| `GET /tickets/{id}/history` | `tickets:read` | Recorded status changes, each with its `author` |
+| `POST /tickets/{id}/comments` | `tickets:write` | Add a comment from JSON `body`; returns 201 |
+| `GET /tickets/{id}/comments` | `tickets:read` | Comments, oldest first |
+| `GET /stats` | `tickets:read` | Ticket counts by status |
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
@@ -124,11 +125,38 @@ curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
   -d '{"status":"closed","note":"Fixed"}'
 ```
 
-A missing, unknown, or revoked token returns 401 before any ticket is read. A
-missing ticket returns 404, a reused idempotency key with different content 409,
+A missing, unknown, revoked, or expired token returns 401 before any ticket is read,
+and a token without the route's scope returns 403 with
+`WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. A missing ticket
+returns 404, a reused idempotency key with different content 409,
 invalid fields 422, and a storage failure 503 without exposing file paths. Unknown
 JSON fields are rejected. Ticket creation, status changes, and comments record the
 name of the token that made them.
+
+### Token scopes and expiry
+
+| Scope | Grants |
+| --- | --- |
+| `tickets:read` | Reading tickets, history, comments, and statistics |
+| `tickets:write` | Creating tickets, changing status, and adding comments |
+| `emails:read` | Seeing requester emails; without it, `email` is always `null` in responses |
+
+A token created without `--scope` gets every scope. Grant only what a client needs,
+and add `--expires-in DAYS` (1 to 3650) for a token that should stop working on its
+own:
+
+```sh
+python3 tickets.py token create web-form --scope tickets:write
+python3 tickets.py token create dashboard --scope tickets:read --expires-in 90
+python3 tickets.py token list
+```
+
+Scopes and expiry are fixed when a token is created; to change them, create a new
+token and revoke the old one. A token without `emails:read` can still submit a ticket
+with an email, and notifications are still sent; the address is only left out of
+what that token is shown, including the response to its own submission. `emails:read`
+grants nothing by itself. Tokens created before scopes existed keep every scope and
+never expire.
 
 ## Configuration
 
@@ -235,7 +263,12 @@ does not reserve its key. The CLI and API share keys when they share a database.
 
 **Authentication.** Tokens are 256-bit random values. Only their SHA-256 hashes are
 stored, so a lost token cannot be recovered, only revoked and replaced under a new
-name. Revocation applies to the next request. Tokens are created and revoked only
+name. Each token stores its scopes and an optional expiry time next to its hash, and
+both are checked on every request, so revocation and expiry apply to the next request.
+Each route depends on one scope, which is checked after the token and before the
+request body or the ticket, so a client without access learns nothing about either.
+Emails are removed from responses in the API layer, so the CLI, notifications, and
+idempotent replays still see the stored address. Tokens are created and revoked only
 from the terminal, because anyone who can run the CLI can already open the database.
 
 **Outbox.** Notifications are written in the same transaction as the history entry
@@ -263,11 +296,12 @@ python scripts/smoke_docker.py   # needs Docker
 
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, idempotent
-retries, token authentication, the CLI and HTTP interfaces, and notification
-delivery. SMTP tests talk to a small SMTP server on 127.0.0.1 inside the test process
+retries, token authentication, scopes, and expiry, the CLI and HTTP interfaces, and
+notification delivery. SMTP tests talk to a small SMTP server on 127.0.0.1 inside the test process
 (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
-builds the image and checks that the API and CLI containers share data, that tickets,
-tokens, and idempotency keys survive container recreation, that the image runs as a
+builds the image and checks that the API and CLI containers share data, that a
+read-only token cannot write or see emails, that tickets, tokens, and idempotency
+keys survive container recreation, that the image runs as a
 non-root user, and that `send-notifications` delivers through the image. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
 Actions runs ruff, the unit tests on Python 3.10, 3.11, and 3.14, and the Docker smoke
@@ -277,14 +311,15 @@ test.
 
 - SQLite serializes writers, so this suits a small team or local use, not a busy
   shared service.
-- Every token has full access: there are no roles, expiry, or rate limits. Tokens
-  travel in plain text over HTTP, so keep the API on loopback or behind HTTPS.
+- Scopes are coarse (read, write, and emails across all tickets), cannot be changed
+  after a token is created, and there are no rate limits. Tokens travel in plain text
+  over HTTP, so keep the API on loopback or behind HTTPS.
 - Authors are token names, not people, and terminal changes have no author (shown as
   `local`). Entries from before attribution existed have none either.
 - Idempotency keys are global rather than scoped to a token, and never expire.
 - Comments cannot be edited or deleted, and a ticket's email cannot be changed.
-- Requester emails are stored in plain text and visible to every token holder. The
-  outbox has no HTTP endpoint.
+- Requester emails are stored in plain text in the database, and hidden only from API
+  tokens without `emails:read`. The outbox has no HTTP endpoint.
 - Notifications have no unsubscribe, bounce handling, HTML version, or retention
   policy, and `send-notifications` needs an external scheduler. A permanently refused
   recipient is retried like any other failure.
