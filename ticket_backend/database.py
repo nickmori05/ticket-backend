@@ -28,11 +28,14 @@ def connect(database: Path = DEFAULT_DATABASE) -> sqlite3.Connection:
 
 def _add_missing_columns(connection: sqlite3.Connection) -> None:
     # CREATE TABLE IF NOT EXISTS leaves older tables as they were, so add new columns here.
-    for table, column in (("ticket_comments", "author"), ("ticket_events", "author"), ("tickets", "email")):
+    for table, column, kind in (
+        ("ticket_comments", "author", "TEXT"), ("ticket_events", "author", "TEXT"), ("tickets", "email", "TEXT"),
+        ("api_tokens", "scopes", "TEXT"), ("api_tokens", "expires_at", "TIMESTAMP"),
+    ):
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             try:
-                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             except sqlite3.OperationalError as error:
                 # Another connection may have added the column after the check above.
                 if "duplicate column" not in str(error):

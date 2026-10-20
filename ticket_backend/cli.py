@@ -16,7 +16,7 @@ from ticket_backend.tickets import (
     STATUSES, IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
     list_tickets, set_status, statistics, ticket_history,
 )
-from ticket_backend.tokens import TokenNotFoundError, create_token, list_tokens, revoke_token
+from ticket_backend.tokens import SCOPES, TokenNotFoundError, create_token, list_tokens, revoke_token
 
 
 def parser() -> argparse.ArgumentParser:
@@ -64,7 +64,11 @@ def parser() -> argparse.ArgumentParser:
     actions = token.add_subparsers(dest="action", required=True)
     token_create = actions.add_parser("create", help="Create a token; it is shown only once")
     token_create.add_argument("name", help="1-64 letters, digits, dots, underscores, or hyphens")
-    actions.add_parser("list", help="Show token names and whether they are active")
+    token_create.add_argument("--scope", action="append", choices=SCOPES, dest="scopes",
+                              help="Grant one scope; repeat for more (default: every scope)")
+    token_create.add_argument("--expires-in", type=int, metavar="DAYS",
+                              help="Stop the token working after this many days (default: never)")
+    actions.add_parser("list", help="Show tokens with their scopes and whether they are active")
     token_revoke = actions.add_parser("revoke", help="Stop a token from authenticating")
     token_revoke.add_argument("name")
     return root
@@ -120,13 +124,20 @@ def display(command: str, result, action: str | None = None) -> None:
             print(f"{status}: {count}")
     elif action == "create":
         print(f"Token for {result['name']}: {result['token']}")
+        print(f"Scopes: {' '.join(result['scopes'])}")
+        if result["expires_at"]:
+            print(f"Expires: {result['expires_at']} UTC")
         print("Store it now; it cannot be shown again.")
     elif action == "list":
         if not result:
             print("No API tokens.")
         for row in result:
-            state = f"revoked {row['revoked_at']} UTC" if row["revoked_at"] else "active"
-            print(f"{row['name']} (created {row['created_at']} UTC, {state})")
+            details = [f"created {row['created_at']} UTC"]
+            if row["revoked_at"]:
+                details.append(f"revoked {row['revoked_at']} UTC")
+            elif row["expires_at"]:
+                details.append(f"{'expired' if row['state'] == 'expired' else 'expires'} {row['expires_at']} UTC")
+            print(f"{row['name']} [{row['state']}] {' '.join(row['scopes'])} ({', '.join(details)})")
     elif action == "revoke":
         print(f"Token {result['name']} revoked.")
 
@@ -183,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "retry-notifications":
             result = retry_notifications(args.database, args.ids or None)
         elif args.action == "create":
-            result = create_token(args.name, args.database)
+            result = create_token(args.name, args.database, scopes=args.scopes, expires_in_days=args.expires_in)
         elif args.action == "list":
             result = list_tokens(args.database)
         else:
