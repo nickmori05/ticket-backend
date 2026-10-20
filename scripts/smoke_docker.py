@@ -128,14 +128,23 @@ def main() -> int:
                              "recipients": [[payload["email"]]] * 2}, f"SMTP delivery failed: {delivered}"
         assert {row["status"] for row in command("outbox")} == {"sent"}, "CLI did not see sent notifications"
         assert command("retry-notifications") == [], "Nothing should need retrying"
+        status, outbox = request(api_address(), f"/notifications?ticket_id={http_id}")
+        assert status == 200 and [(row["status"], row["recipient"]) for row in outbox] == \
+            [("sent", payload["email"])] * 2, "API did not see notifications sent by the CLI"
+        assert request(api_address(), "/notifications/retry", "POST", {}) == (200, []), "API retried a sent message"
+        try:
+            request(api_address(), "/notifications", bearer=reader["token"])
+            raise AssertionError("API showed the outbox to a token without notifications:read")
+        except HTTPError as error:
+            assert error.code == 403, f"Expected 403 for the outbox without its scope, got {error.code}"
         command("token", "revoke", "smoke")
         try:
             request(api_address(), "/stats")
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens with scopes, status attribution, notification outbox and "
-              "SMTP delivery, persistent retries, container recreation, and non-root execution passed.")
+        print("Docker CLI/API sharing, API tokens with scopes, status attribution, notification outbox, its API, "
+              "and SMTP delivery, persistent retries, container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)
