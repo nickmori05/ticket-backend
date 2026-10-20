@@ -5,7 +5,8 @@
 A Python and SQLite ticket tracker with terminal commands and an HTTP API.
 Submit a ticket, retrieve it by ID, track its status changes, and keep
 working notes as comments. Tickets with a requester email queue a notification
-for each status change. The API requires a token created from the terminal.
+for each status change, which `tickets.py send-notifications` delivers over SMTP.
+The API requires a token created from the terminal.
 Requires Python 3.10 or later. The terminal commands use the standard library; the
 optional API uses FastAPI and Uvicorn.
 
@@ -41,6 +42,8 @@ python3 tickets.py comment 1 "Asked the customer for a screenshot"
 python3 tickets.py comments 1
 python3 tickets.py stats
 python3 tickets.py outbox --status pending
+python3 tickets.py send-notifications
+python3 tickets.py retry-notifications
 python3 tickets.py token create alice
 python3 tickets.py token list
 python3 tickets.py token revoke alice
@@ -78,8 +81,9 @@ python3 tickets.py --database /tmp/ticket-demo.db --json list
 
 JSON output goes to stdout; errors go to stderr. JSON creation requires both
 fields and never prompts. Exit codes are `0` for success, `1` for a missing
-ticket or token, `2` for invalid input or a storage error, `3` for a conflicting
-submission key, and `130` for cancellation.
+ticket, token, or notification, `2` for invalid input, configuration, or a storage
+error, `3` for a conflicting submission key, `4` when the SMTP server cannot be
+reached or rejects the session, and `130` for cancellation.
 
 ## Run with Docker
 
@@ -216,16 +220,82 @@ python3 tickets.py --json outbox --status failed --limit 50
 `pending`, `sent`, or `failed`, plus `--limit` and `--offset`. Each row shows its
 recipient, subject, attempt count, and last delivery error.
 
-Nothing is sent yet. `functions.deliver_notifications(send, database)` drains the
-outbox for a future mail sender: it calls `send(notification)` for each due pending
-notification, oldest first, up to `limit` (default 20) per call. A call that returns
-marks the notification `sent`; one that raises records the error and schedules a
-retry after `retry_delay` seconds (default 60), doubling each attempt up to a day.
-After `max_attempts` (default 5) the notification is marked `failed` and is not
-retried. Each attempt is counted and its retry scheduled before `send` runs, so a
-crash mid-send or a second sender running at the same time waits for the delay
-instead of sending at once. Delivery is still at least once: if the process stops
-after sending but before recording success, that message is sent again later.
+### Sending notifications
+
+`send-notifications` delivers due notifications over SMTP using only the standard
+library. Configure it with environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `TICKETS_SMTP_HOST` | Mail server host name or IP address (required) |
+| `TICKETS_SMTP_FROM` | Sender, such as `support@example.com` or `Support <support@example.com>` (required) |
+| `TICKETS_SMTP_SECURITY` | `starttls` (default), `ssl` for implicit TLS, or `none` |
+| `TICKETS_SMTP_PORT` | Defaults to 587 for `starttls`, 465 for `ssl`, and 25 for `none` |
+| `TICKETS_SMTP_USERNAME`, `TICKETS_SMTP_PASSWORD` | Optional login; set both or neither |
+| `TICKETS_SMTP_TIMEOUT` | Seconds to wait for the server, default 10 |
+
+```sh
+export TICKETS_SMTP_HOST=smtp.example.com
+export TICKETS_SMTP_FROM="Support <support@example.com>"
+export TICKETS_SMTP_USERNAME=support TICKETS_SMTP_PASSWORD=...
+python3 tickets.py send-notifications
+python3 tickets.py --json send-notifications --limit 50 --max-attempts 3 --retry-delay 300
+```
+
+Each run sends at most `--limit` due notifications (1–100, default 20) over one
+connection and prints how many were sent, scheduled for retry, or marked failed.
+TLS certificates are verified against Python's default trust store. Credentials are
+refused with `none` unless the server is on localhost, so a password is never sent in
+plain text across a network. Settings are checked and the server is reached before any
+notification is claimed: missing or invalid settings exit with code 2, and an
+unreachable server, failed STARTTLS, or rejected login exits with code 4, leaving the
+outbox untouched. A run with nothing due exits without connecting.
+
+The command sends one batch and exits, so schedule it with cron, a systemd timer, or a
+similar runner. For example, every minute with crontab:
+
+```text
+* * * * * cd /path/to/ticket-backend && TICKETS_SMTP_HOST=... TICKETS_SMTP_FROM=... python3 tickets.py send-notifications
+```
+
+With Docker, pass the settings to the terminal service:
+
+```sh
+docker compose run --rm -e TICKETS_SMTP_HOST=smtp.example.com \
+  -e TICKETS_SMTP_FROM=support@example.com tickets send-notifications
+```
+
+Messages are plain text with the queued subject and body, a `Message-ID` that stays
+the same for every attempt at one notification, and `Auto-Submitted: auto-generated`
+so mail systems do not send auto-replies back.
+
+### Retries
+
+A message the server refuses, or a connection that drops mid-message, is recorded on
+that notification and the run continues with the next one on a fresh connection.
+`send-notifications` uses `functions.deliver_notifications(send, database)`, which
+can also drive other senders: it calls `send(notification)` for each due pending
+notification, oldest first. A call that returns marks the notification `sent`; one
+that raises records the error and schedules a retry after `--retry-delay` seconds
+(default 60), doubling each attempt up to a day. After `--max-attempts` (default 5)
+the notification is marked `failed` and is not retried. Each attempt is counted and
+its retry scheduled before sending, so a crash mid-send or a second sender running
+at the same time waits for the delay instead of sending at once. Delivery is still at
+least once: if the process stops after sending but before recording success, that
+message is sent again later with the same `Message-ID`.
+
+Once the cause of a failure is fixed, requeue failed notifications:
+
+```sh
+python3 tickets.py outbox --status failed
+python3 tickets.py retry-notifications          # every failed notification
+python3 tickets.py retry-notifications 4 7      # only these
+```
+
+Requeued notifications become `pending`, due immediately, with their attempt count
+reset so they get the full number of attempts again. The last error stays visible
+until the next attempt. Naming a notification that does not exist exits with code 1,
+and naming one that is not `failed` exits with code 2; in both cases nothing changes.
 
 Notification emails are visible to every API token holder through the ticket and are
 stored in plain text in the database. The outbox is managed from the terminal only;
@@ -302,8 +372,13 @@ message per history entry, unchanged statuses and replays queuing nothing, rollb
 of the ticket or status change when queuing fails, older tables gaining the email
 column, delivery success, recorded failures, retry delays, permanent failure after
 the maximum attempts, a concurrent sender skipping a claimed message, and the
-`outbox` command and HTTP `email` field. Delivery tests use in-process fake senders
-and never contact a mail server.
+`outbox` command and HTTP `email` field. SMTP tests run the sender and the
+`send-notifications` command against a small SMTP server on 127.0.0.1 inside the
+test process (`tests/smtp_stub.py`), never a real mail server. They cover settings
+validation, message headers and encoding, delivery over one connection, a refused
+recipient, a dropped connection, login, unreachable servers, failed STARTTLS, and
+rejected logins leaving the outbox untouched, and `retry-notifications` requeueing all
+or named failed notifications without changing anything on an invalid request.
 
 Run the Docker integration check separately:
 
@@ -317,8 +392,10 @@ retries an HTTP submission after recreation and from a separate CLI container,
 checking that ticket and history counts stay unchanged. It creates an API token
 with the CLI container, checks that the API rejects requests without it, attributes
 HTTP status changes and an HTTP comment to it, checks that the CLI outbox shows the
-notifications queued by an HTTP ticket with an email and that retries queue no more,
-and checks that revoking the token from the CLI takes effect. It uses
+notifications queued by an HTTP ticket with an email and that retries queue no more.
+It checks that `send-notifications` reports an unreachable SMTP server without claiming
+anything, then delivers both notifications through the image to the test SMTP server
+running inside the same container, and checks that revoking the token from the CLI takes effect. It uses
 a random loopback port and removes only its temporary Compose project and
 volume. GitHub Actions runs this check on Linux alongside
 the Python suite on versions 3.10, 3.11, and 3.14.
@@ -332,6 +409,7 @@ Terminal input or CLI arguments      HTTP requests
            |                              |
            +------------------------------+
       functions.py         validation, queries, transactions
+           |               (mailer.py sends the outbox over SMTP)
            |
          db.py             connections and schema initialization
            |
@@ -353,8 +431,9 @@ partially created submission.
 
 ## Scope
 
-This is a local support-ticket tracker. It queues notification emails but does not
-send them, and API tokens identify callers without separating their permissions.
+This is a local support-ticket tracker. It queues notification emails and sends them
+in batches when `send-notifications` runs, and API tokens identify callers without
+separating their permissions.
 SQLite serializes writers, so this design targets local workflows rather than a
 busy shared service. Initialization adds missing tables, indexes, the `author`
 columns on comments and history, and the `email` column on tickets; it does not
@@ -368,7 +447,7 @@ or deleted.
 
 Tickets created before notifications existed have no email and never queue any,
 and earlier history is not queued retroactively. There is no unsubscribe, outbox
-retention, or way to retry a `failed` notification other than editing the database.
+retention, HTML mail, or bounce handling; the sender does not run on its own schedule;
+and a refused recipient is retried like any other failure rather than failed at once.
 
-Next steps: add an SMTP sender that runs `deliver_notifications` on a schedule,
-configured through environment variables, and test it against a local mail sink.
+Next steps: add an unsubscribe link and a retention policy for sent notifications.
