@@ -39,11 +39,11 @@ def main() -> int:
 
     token = None
 
-    def request(base, path, method="GET", payload=None, idempotency_key=None, authorized=True):
+    def request(base, path, method="GET", payload=None, idempotency_key=None, authorized=True, bearer=None):
         body = json.dumps(payload).encode() if payload is not None else None
         headers = {"Content-Type": "application/json"} if payload is not None else {}
         if authorized:
-            headers["Authorization"] = f"Bearer {token}"
+            headers["Authorization"] = f"Bearer {bearer or token}"
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
         with urlopen(Request(base + path, data=body, headers=headers, method=method), timeout=5) as response:
@@ -85,6 +85,15 @@ def main() -> int:
         assert status == 201 and replayed == submitted
         http_id = str(submitted["id"])
         assert command("show", http_id) == submitted
+        reader = command("token", "create", "smoke-reader", "--scope", "tickets:read", "--expires-in", "1")
+        assert reader["scopes"] == ["tickets:read"] and reader["expires_at"], "CLI did not create a scoped token"
+        status, hidden = request(address, f"/tickets/{http_id}", bearer=reader["token"])
+        assert status == 200 and hidden == {**submitted, "email": None}, "Email shown without the emails:read scope"
+        try:
+            request(address, "/tickets", "POST", payload, bearer=reader["token"])
+            raise AssertionError("API accepted a write from a read-only token")
+        except HTTPError as error:
+            assert error.code == 403, f"Expected 403 for a read-only token, got {error.code}"
         request(address, f"/tickets/{http_id}/status", "PATCH", {"status": "closed", "note": "Done"})
         events = command("history", http_id)
         assert [event["author"] for event in events] == ["smoke", "smoke"], "CLI did not see status authors"
@@ -125,8 +134,8 @@ def main() -> int:
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens, status attribution, notification outbox and SMTP delivery, "
-              "persistent retries, container recreation, and non-root execution passed.")
+        print("Docker CLI/API sharing, API tokens with scopes, status attribution, notification outbox and "
+              "SMTP delivery, persistent retries, container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)

@@ -1,4 +1,7 @@
-"""The HTTP API. Run it with `uvicorn ticket_backend.api:app`; every route except /health needs a bearer token."""
+"""The HTTP API. Run it with `uvicorn ticket_backend.api:app`; every route except /health needs a bearer token.
+
+Each route also needs one scope on that token, and requester emails are shown only to tokens with emails:read.
+"""
 
 import logging
 import os
@@ -19,7 +22,7 @@ from ticket_backend.tickets import (
     IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
     list_tickets, set_status, statistics, ticket_history,
 )
-from ticket_backend.tokens import authenticate
+from ticket_backend.tokens import token_access
 
 
 Status = Literal["open", "in_progress", "closed"]
@@ -47,7 +50,8 @@ class TicketOutput(BaseModel):
     title: str
     message: str
     status: Status
-    email: str | None
+    email: Annotated[str | None, Field(description="The requester address, or null when there is none or the "
+                                                   "token does not have the emails:read scope.")]
     created_at: str
 
 
@@ -103,16 +107,31 @@ def create_app(database: Path | None = None) -> FastAPI:
     app.add_exception_handler(sqlite3.Error, unavailable_storage)
     app.add_exception_handler(OSError, unavailable_storage)
 
-    def caller(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> str:
-        name = authenticate(credentials.credentials if credentials else None, database)
-        if name is None:
+    def caller(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> dict:
+        access = token_access(credentials.credentials if credentials else None, database)
+        if access is None:
             raise HTTPException(status_code=401, detail="A valid API token is required.",
                                 headers={"WWW-Authenticate": "Bearer"})
-        return name
+        return access
+
+    def requires(scope: str):
+        def check(access: Annotated[dict, Depends(caller)]) -> dict:
+            if scope not in access["scopes"]:
+                # RFC 6750 names the missing scope so a client can tell this apart from a bad token.
+                raise HTTPException(status_code=403, detail=f"This token does not have the {scope} scope.",
+                                    headers={"WWW-Authenticate": f'Bearer error="insufficient_scope", scope="{scope}"'})
+            return access
+        return check
+
+    reader, writer = requires("tickets:read"), requires("tickets:write")
+
+    def shown(ticket: dict, access: dict) -> dict:
+        return ticket if "emails:read" in access["scopes"] else {**ticket, "email": None}
 
     # Every route except /health requires a token; FastAPI reuses the result within a request.
     protected = APIRouter(dependencies=[Depends(caller)],
-                          responses={401: {"description": "Missing, unknown, or revoked API token"}})
+                          responses={401: {"description": "Missing, unknown, revoked, or expired API token"},
+                                     403: {"description": "The token does not have the scope this route needs"}})
 
     @app.get("/health")
     def health() -> dict:
@@ -123,47 +142,49 @@ def create_app(database: Path | None = None) -> FastAPI:
     def submit(
         payload: TicketInput,
         response: Response,
-        author: Annotated[str, Depends(caller)],
+        access: Annotated[dict, Depends(writer)],
         idempotency_key: Annotated[str | None, Header(
             description="Reuse for retries of one submission. "
                         "1-128 ASCII letters, digits, dots, underscores, or hyphens."
         )] = None,
     ):
         ticket = create_ticket(payload.title, payload.message, database,
-                               idempotency_key=idempotency_key, author=author, email=payload.email)
+                               idempotency_key=idempotency_key, author=access["name"], email=payload.email)
         response.headers["Location"] = f"/tickets/{ticket['id']}"
-        return ticket
+        return shown(ticket, access)
 
     @protected.get("/tickets", response_model=list[TicketOutput])
     def listing(
+        access: Annotated[dict, Depends(reader)],
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
         status: Status | None = None,
         search: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     ):
-        return list_tickets(database, limit, offset=offset, status=status, search=search)
+        return [shown(ticket, access)
+                for ticket in list_tickets(database, limit, offset=offset, status=status, search=search)]
 
     @protected.get("/tickets/{ticket_id}", response_model=TicketOutput)
-    def show(ticket_id: TicketId):
-        return get_ticket(ticket_id, database)
+    def show(ticket_id: TicketId, access: Annotated[dict, Depends(reader)]):
+        return shown(get_ticket(ticket_id, database), access)
 
     @protected.patch("/tickets/{ticket_id}/status", response_model=TicketOutput)
-    def change_status(ticket_id: TicketId, payload: StatusInput, author: Annotated[str, Depends(caller)]):
-        return set_status(ticket_id, payload.status, database, note=payload.note, author=author)
+    def change_status(ticket_id: TicketId, payload: StatusInput, access: Annotated[dict, Depends(writer)]):
+        return shown(set_status(ticket_id, payload.status, database, note=payload.note, author=access["name"]), access)
 
-    @protected.get("/tickets/{ticket_id}/history", response_model=list[EventOutput])
+    @protected.get("/tickets/{ticket_id}/history", response_model=list[EventOutput], dependencies=[Depends(reader)])
     def history(ticket_id: TicketId):
         return ticket_history(ticket_id, database)
 
     @protected.post("/tickets/{ticket_id}/comments", status_code=201, response_model=CommentOutput)
-    def comment(ticket_id: TicketId, payload: CommentInput, author: Annotated[str, Depends(caller)]):
-        return add_comment(ticket_id, payload.body, database, author=author)
+    def comment(ticket_id: TicketId, payload: CommentInput, access: Annotated[dict, Depends(writer)]):
+        return add_comment(ticket_id, payload.body, database, author=access["name"])
 
-    @protected.get("/tickets/{ticket_id}/comments", response_model=list[CommentOutput])
+    @protected.get("/tickets/{ticket_id}/comments", response_model=list[CommentOutput], dependencies=[Depends(reader)])
     def comments(ticket_id: TicketId):
         return list_comments(ticket_id, database)
 
-    @protected.get("/stats", response_model=StatsOutput)
+    @protected.get("/stats", response_model=StatsOutput, dependencies=[Depends(reader)])
     def stats():
         return statistics(database)
 
