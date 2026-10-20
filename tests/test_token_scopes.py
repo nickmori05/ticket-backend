@@ -11,7 +11,7 @@ import unittest
 from ticket_backend import cli
 from ticket_backend.database import connect
 from ticket_backend.tokens import (
-    SCOPES, authenticate, create_token, list_tokens, revoke_token, token_access,
+    LEGACY_SCOPES, SCOPES, authenticate, create_token, list_tokens, revoke_token, token_access,
 )
 
 
@@ -78,9 +78,11 @@ class TokenScopeTests(unittest.TestCase):
                 INSERT INTO api_tokens (name, token_hash)
                 VALUES ('old', '{hashlib.sha256(token.encode()).hexdigest()}');
             """)
-        self.assertEqual(token_access(token, legacy), {"name": "old", "scopes": list(SCOPES)})
+        self.assertEqual(token_access(token, legacy), {"name": "old", "scopes": list(LEGACY_SCOPES)})
+        self.assertNotIn("notifications:read", LEGACY_SCOPES, "Older tokens must not gain newer scopes")
         listed = list_tokens(legacy)[0]
-        self.assertEqual((listed["scopes"], listed["expires_at"], listed["state"]), (list(SCOPES), None, "active"))
+        self.assertEqual((listed["scopes"], listed["expires_at"], listed["state"]),
+                         (list(LEGACY_SCOPES), None, "active"))
         reader = create_token("reader", legacy, scopes=["tickets:read"], expires_in_days=1)
         self.assertEqual(token_access(reader["token"], legacy)["scopes"], ["tickets:read"])
 
@@ -115,7 +117,7 @@ class TokenScopeCliTests(unittest.TestCase):
         expire(self.database, "temp")
         revoke_token("gone", self.database)
         lines = self.run_command("token", "list")[1].splitlines()
-        self.assertTrue(lines[0].startswith("alice [active] tickets:read tickets:write emails:read (created "))
+        self.assertTrue(lines[0].startswith(f"alice [active] {' '.join(SCOPES)} (created "))
         self.assertRegex(lines[1], r"^temp \[expired\] tickets:read \(created .* UTC, expired .* UTC\)$")
         self.assertRegex(lines[2], r"^gone \[revoked\] tickets:write \(created .* UTC, revoked .* UTC\)$")
 

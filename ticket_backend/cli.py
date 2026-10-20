@@ -52,6 +52,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("stats", help="Count tickets by status")
     outbox = commands.add_parser("outbox", help="Show queued notification emails, oldest first")
     outbox.add_argument("--status", choices=NOTIFICATION_STATUSES)
+    outbox.add_argument("--ticket", type=int, metavar="ID", help="Only notifications for this ticket")
     outbox.add_argument("--limit", type=int, default=20)
     outbox.add_argument("--offset", type=int, default=0)
     send = commands.add_parser("send-notifications", help="Send due notifications over SMTP (TICKETS_SMTP_* settings)")
@@ -188,7 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "stats":
             result = statistics(args.database)
         elif args.command == "outbox":
-            result = list_notifications(args.database, args.limit, offset=args.offset, status=args.status)
+            result = list_notifications(args.database, args.limit, offset=args.offset, status=args.status,
+                                        ticket_id=args.ticket)
         elif args.command == "send-notifications":
             result = send_notifications(args)
         elif args.command == "retry-notifications":

@@ -16,6 +16,10 @@ class NotificationNotFoundError(LookupError):
     pass
 
 
+class NotificationStateError(ValueError):
+    """A named notification is not in a status the operation accepts."""
+
+
 def queue_notification(connection: sqlite3.Connection, ticket: sqlite3.Row, event_id: int, subject: str,
                        body: str) -> None:
     """Queue a message for a ticket's requester, if it has one, inside the caller's open transaction.
@@ -31,26 +35,43 @@ def queue_notification(connection: sqlite3.Connection, ticket: sqlite3.Row, even
     )
 
 
-
 def list_notifications(
     database: Path = DEFAULT_DATABASE,
     limit: int = 20,
     *,
     offset: int = 0,
     status: str | None = None,
+    ticket_id: int | None = None,
 ) -> list[dict]:
-    """Return outbox entries oldest first, optionally only those with one status."""
+    """Return outbox entries oldest first, optionally only those with one status or for one ticket."""
     require_page(limit, offset)
-    if status is not None and status not in NOTIFICATION_STATUSES:
-        raise ValueError(f"Notification status must be one of: {', '.join(NOTIFICATION_STATUSES)}.")
-    where = " WHERE status = ?" if status is not None else ""
+    clauses, parameters = [], []
+    if status is not None:
+        if status not in NOTIFICATION_STATUSES:
+            raise ValueError(f"Notification status must be one of: {', '.join(NOTIFICATION_STATUSES)}.")
+        clauses.append("status = ?")
+        parameters.append(status)
+    if ticket_id is not None:
+        clauses.append("ticket_id = ?")
+        parameters.append(require_id(ticket_id))
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
     with closing(connect(database)) as connection:
         return [
             dict(row) for row in connection.execute(
                 "SELECT * FROM ticket_notifications" + where + " ORDER BY id LIMIT ? OFFSET ?",
-                (*([status] if status is not None else []), limit, offset),
+                (*parameters, limit, offset),
             )
         ]
+
+
+def get_notification(notification_id: int, database: Path = DEFAULT_DATABASE) -> dict:
+    """Return one outbox entry, raising NotificationNotFoundError when it does not exist."""
+    notification_id = require_id(notification_id, "Notification ID")
+    with closing(connect(database)) as connection:
+        row = connection.execute("SELECT * FROM ticket_notifications WHERE id = ?", (notification_id,)).fetchone()
+    if row is None:
+        raise NotificationNotFoundError(f"Notification #{notification_id} was not found.")
+    return dict(row)
 
 
 def count_due_notifications(database: Path = DEFAULT_DATABASE) -> int:
@@ -86,8 +107,8 @@ def retry_notifications(database: Path = DEFAULT_DATABASE, notification_ids: lis
                 if row is None:
                     raise NotificationNotFoundError(f"Notification #{identifier} was not found.")
                 if row["status"] != "failed":
-                    raise ValueError(f"Notification #{identifier} is {row['status']}; only failed notifications "
-                                     "can be retried.")
+                    raise NotificationStateError(f"Notification #{identifier} is {row['status']}; "
+                                                 "only failed notifications can be retried.")
             connection.executemany(
                 """UPDATE ticket_notifications SET status = 'pending', attempts = 0,
                    next_attempt_at = CURRENT_TIMESTAMP WHERE id = ?""",

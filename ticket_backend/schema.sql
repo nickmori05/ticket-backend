@@ -63,3 +63,4 @@ CREATE TABLE IF NOT EXISTS ticket_notifications (
 );
 
 CREATE INDEX IF NOT EXISTS ticket_notifications_due ON ticket_notifications(status, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS ticket_notifications_ticket_id ON ticket_notifications(ticket_id, id);
