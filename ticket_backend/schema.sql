@@ -20,10 +20,21 @@ CREATE TABLE IF NOT EXISTS ticket_events (
 CREATE INDEX IF NOT EXISTS ticket_events_ticket_id ON ticket_events(ticket_id, id);
 CREATE INDEX IF NOT EXISTS tickets_status_id ON tickets(status, id);
 
+-- Keys saved before keys were scoped to a caller. Read only; see submissions.py for who may replay each one.
 CREATE TABLE IF NOT EXISTS ticket_submissions (
     idempotency_key TEXT PRIMARY KEY NOT NULL,
     ticket_id INTEGER NOT NULL REFERENCES tickets(id),
     response_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ticket_submission_keys (
+    -- The token name, or '' for submissions without an author, such as those from the terminal.
+    owner TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id),
+    response_json TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner, idempotency_key)
 );
 
 CREATE TABLE IF NOT EXISTS ticket_comments (

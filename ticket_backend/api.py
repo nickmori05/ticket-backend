@@ -187,13 +187,13 @@ def create_app(database: Path | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @protected.post("/tickets", status_code=201, response_model=TicketOutput,
-                    responses={409: {"description": "Submission key already used for different ticket content"}})
+                    responses={409: {"description": "This token already used the key for different ticket content"}})
     def submit(
         payload: TicketInput,
         response: Response,
         access: Annotated[dict, Depends(writer)],
         idempotency_key: Annotated[str | None, Header(
-            description="Reuse for retries of one submission. "
+            description="Reuse for retries of one submission; each token has its own keys. "
                         "1-128 ASCII letters, digits, dots, underscores, or hyphens."
         )] = None,
     ):

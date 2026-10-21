@@ -123,12 +123,14 @@ class StatusAttributionApiTests(unittest.TestCase):
         self.assertEqual(get_ticket(identifier, self.database)["status"], "open")
         self.assertEqual([event["author"] for event in ticket_history(identifier, self.database)], ["alice"])
 
-    def test_replay_by_another_token_keeps_the_original_author(self):
+    def test_replay_keeps_the_original_author_and_another_token_gets_its_own_ticket(self):
         first = self.submit(self.alice, "login-1")
-        replayed = self.submit(self.bob, "login-1")
-        self.assertEqual(replayed.status_code, 201)
-        self.assertEqual(replayed.json(), first.json())
+        self.assertEqual(self.submit(self.alice, "login-1").json(), first.json())
+        other = self.submit(self.bob, "login-1")
+        self.assertEqual(other.status_code, 201)
+        self.assertNotEqual(other.json()["id"], first.json()["id"])
         self.assertEqual([event["author"] for event in ticket_history(first.json()["id"], self.database)], ["alice"])
+        self.assertEqual([event["author"] for event in ticket_history(other.json()["id"], self.database)], ["bob"])
 
     def test_openapi_documents_the_event_author(self):
         schema = self.client.get("/openapi.json").json()
