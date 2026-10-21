@@ -109,8 +109,6 @@ def main() -> int:
         assert status == 200 and restored["status"] == "closed"
         status, replayed = request(api_address(), "/tickets", "POST", payload, key)
         assert status == 201 and replayed == submitted, "Retry did not survive container recreation"
-        assert command("create", "--title", payload["title"], "--message", payload["message"],
-                       "--email", payload["email"], "--idempotency-key", key) == submitted
         assert command("show", http_id)["status"] == "closed", "Retry changed the current ticket"
         assert command("stats")["total"] == 2, "Retry created a duplicate ticket"
         assert len(command("history", http_id)) == 2, "Retry added duplicate history"
@@ -137,6 +135,12 @@ def main() -> int:
             raise AssertionError("API showed the outbox to a token without notifications:read")
         except HTTPError as error:
             assert error.code == 403, f"Expected 403 for the outbox without its scope, got {error.code}"
+        # The terminal has its own keys, so the token's key with other content is a new ticket, not a conflict.
+        local = command("create", "--title", "CLI ticket", "--message", "Same key as the token",
+                        "--idempotency-key", key)
+        assert local["id"] not in (created["id"], submitted["id"]), "CLI shared an API token's idempotency key"
+        status, replayed = request(api_address(), "/tickets", "POST", payload, key)
+        assert status == 201 and replayed == submitted, "CLI key changed the token's replay"
         command("token", "revoke", "smoke")
         try:
             request(api_address(), "/stats")
@@ -144,7 +148,7 @@ def main() -> int:
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
         print("Docker CLI/API sharing, API tokens with scopes, status attribution, notification outbox, its API, "
-              "and SMTP delivery, persistent retries, container recreation, and non-root execution passed.")
+              "and SMTP delivery, persistent per-token retries, container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)
