@@ -14,7 +14,7 @@ filed them by email.
 - **Safe retries**: an optional idempotency key makes a repeated submission return the
   original ticket instead of creating a duplicate.
 - **Email notifications** through a transactional outbox, delivered over SMTP with
-  retries and backoff.
+  retries and backoff, and inspectable and retryable over HTTP.
 - **Docker Compose** setup that runs the API and CLI against one persistent volume.
 
 Requires Python 3.10 or later.
@@ -65,7 +65,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `history ID` | Show recorded status changes |
 | `comment ID BODY` / `comments ID` | Add a comment / list comments, oldest first |
 | `stats` | Count tickets by status |
-| `outbox [--status S] [--limit N] [--offset N]` | List queued notifications, oldest first |
+| `outbox [--status S] [--ticket ID] [--limit N] [--offset N]` | List queued notifications, oldest first |
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
 | `retry-notifications [ID ...]` | Requeue failed notifications |
 | `token create NAME [--scope S ...] [--expires-in DAYS]` | Create an API token, shown once |
@@ -112,6 +112,9 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `POST /tickets/{id}/comments` | `tickets:write` | Add a comment from JSON `body`; returns 201 |
 | `GET /tickets/{id}/comments` | `tickets:read` | Comments, oldest first |
 | `GET /stats` | `tickets:read` | Ticket counts by status |
+| `GET /notifications` | `notifications:read` | Outbox, oldest first, with optional `status`, `ticket_id`, `limit`, and `offset` |
+| `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
+| `POST /notifications/retry` | `notifications:write` | Requeue failed notifications from JSON `ids`, or all failed ones without a body |
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
@@ -128,9 +131,9 @@ curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
 A missing, unknown, revoked, or expired token returns 401 before any ticket is read,
 and a token without the route's scope returns 403 with
 `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. A missing ticket
-returns 404, a reused idempotency key with different content 409,
-invalid fields 422, and a storage failure 503 without exposing file paths. Unknown
-JSON fields are rejected. Ticket creation, status changes, and comments record the
+or notification returns 404, a reused idempotency key with different content or a
+retry of a notification that is not `failed` 409, invalid fields 422, and a storage
+failure 503 without exposing file paths. Unknown JSON fields are rejected. Ticket creation, status changes, and comments record the
 name of the token that made them.
 
 ### Token scopes and expiry
@@ -139,7 +142,9 @@ name of the token that made them.
 | --- | --- |
 | `tickets:read` | Reading tickets, history, comments, and statistics |
 | `tickets:write` | Creating tickets, changing status, and adding comments |
-| `emails:read` | Seeing requester emails; without it, `email` is always `null` in responses |
+| `emails:read` | Seeing requester emails; without it, `email` and `recipient` are always `null` in responses |
+| `notifications:read` | Reading the outbox, including subjects and bodies, which repeat ticket titles, messages, and notes |
+| `notifications:write` | Requeueing failed notifications |
 
 A token created without `--scope` gets every scope. Grant only what a client needs,
 and add `--expires-in DAYS` (1 to 3650) for a token that should stop working on its
@@ -155,8 +160,12 @@ Scopes and expiry are fixed when a token is created; to change them, create a ne
 token and revoke the old one. A token without `emails:read` can still submit a ticket
 with an email, and notifications are still sent; the address is only left out of
 what that token is shown, including the response to its own submission. `emails:read`
-grants nothing by itself. Tokens created before scopes existed keep every scope and
-never expire.
+grants nothing by itself.
+
+A token keeps exactly the scopes it was created with, so it never gains a scope added
+in a later version. Tokens created before scopes existed keep `tickets:read`,
+`tickets:write`, and `emails:read` and never expire; create a new token to use the
+notification endpoints.
 
 ## Configuration
 
@@ -205,6 +214,21 @@ exits with code 2, without changing anything.
 ```sh
 python3 tickets.py outbox --status failed
 python3 tickets.py retry-notifications 4 7
+```
+
+The same operations are available over HTTP to tokens with the notification scopes,
+so failures can be checked and retried without shell access to the server.
+`POST /notifications/retry` follows the same rules as the command: a missing ID
+returns 404 and one that is not `failed` returns 409, and in both cases nothing
+changes. For a token without `emails:read`, the recipient is `null` and the address
+is replaced with `[hidden]` in `last_error`, where SMTP errors usually quote it.
+
+```sh
+curl -H "Authorization: Bearer $TICKETS_TOKEN" 'http://127.0.0.1:8000/notifications?status=failed'
+curl -X POST http://127.0.0.1:8000/notifications/retry \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"ids":[4,7]}'
 ```
 
 Messages are plain text with `Auto-Submitted: auto-generated` and a `Message-ID` that
@@ -300,7 +324,8 @@ retries, token authentication, scopes, and expiry, the CLI and HTTP interfaces, 
 notification delivery. SMTP tests talk to a small SMTP server on 127.0.0.1 inside the test process
 (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
 builds the image and checks that the API and CLI containers share data, that a
-read-only token cannot write or see emails, that tickets, tokens, and idempotency
+read-only token cannot write, see emails, or read the outbox, that the API sees
+notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the image runs as a
 non-root user, and that `send-notifications` delivers through the image. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
@@ -319,7 +344,8 @@ test.
 - Idempotency keys are global rather than scoped to a token, and never expire.
 - Comments cannot be edited or deleted, and a ticket's email cannot be changed.
 - Requester emails are stored in plain text in the database, and hidden only from API
-  tokens without `emails:read`. The outbox has no HTTP endpoint.
+  tokens without `emails:read`. An address an SMTP server quotes in a different form
+  than the recipient, such as an encoded one, is not hidden from `last_error`.
 - Notifications have no unsubscribe, bounce handling, HTML version, or retention
   policy, and `send-notifications` needs an external scheduler. A permanently refused
   recipient is retried like any other failure.

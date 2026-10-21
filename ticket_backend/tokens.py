@@ -14,7 +14,7 @@ import sqlite3
 from ticket_backend.database import DEFAULT_DATABASE, connect
 
 
-SCOPES = ("tickets:read", "tickets:write", "emails:read")
+SCOPES = ("tickets:read", "tickets:write", "emails:read", "notifications:read", "notifications:write")
 # Tokens created before scopes existed have no stored scopes and keep the full access they always had.
 LEGACY_SCOPES = ("tickets:read", "tickets:write", "emails:read")
 MAX_EXPIRY_DAYS = 3650
