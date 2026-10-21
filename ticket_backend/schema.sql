@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     token_hash TEXT NOT NULL UNIQUE,
+    -- Space-separated scope names; NULL for tokens created before scopes existed, which keep full access.
+    scopes TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
     revoked_at TIMESTAMP
 );
 
