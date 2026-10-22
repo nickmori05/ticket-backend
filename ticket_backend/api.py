@@ -1,7 +1,8 @@
 """The HTTP API. Run it with `uvicorn ticket_backend.api:app`; every route except /health needs a bearer token.
 
 Each route also needs one scope on that token, and requester emails, including notification recipients, are shown
-only to tokens with emails:read. Every request made with a valid token is recorded in the audit log.
+only to tokens with emails:read. Each token is limited to a number of requests per minute, and every request made
+with a valid token within that limit is recorded in the audit log.
 """
 
 import logging
@@ -25,6 +26,7 @@ from ticket_backend.database import DEFAULT_DATABASE
 from ticket_backend.notifications import (
     NotificationNotFoundError, NotificationStateError, get_notification, list_notifications, retry_notifications,
 )
+from ticket_backend.ratelimit import RateLimiter, rate_limit_from_environment, require_rate_limit
 from ticket_backend.tickets import (
     IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
     list_tickets, set_status, statistics, ticket_history,
@@ -128,9 +130,15 @@ class RetryInput(BaseModel):
     )
 
 
-def create_app(database: Path | None = None) -> FastAPI:
-    """Build the API for one database, defaulting to TICKETS_DATABASE or the project's tickets.db."""
+def create_app(database: Path | None = None, *, rate_limit: int | None = None) -> FastAPI:
+    """Build the API for one database, defaulting to TICKETS_DATABASE or the project's tickets.db.
+
+    rate_limit is the requests per minute allowed to a token without its own limit, defaulting to TICKETS_RATE_LIMIT
+    or 120; 0 turns that default off.
+    """
     database = Path(database if database is not None else os.environ.get("TICKETS_DATABASE", DEFAULT_DATABASE))
+    default_limit = rate_limit_from_environment() if rate_limit is None else require_rate_limit(rate_limit)
+    limiter = RateLimiter()
     app = FastAPI(title="Ticket Backend", version=__version__)
 
     @app.exception_handler(TicketNotFoundError)
@@ -169,6 +177,15 @@ def create_app(database: Path | None = None) -> FastAPI:
         if access is None:
             raise HTTPException(status_code=401, detail="A valid API token is required.",
                                 headers={"WWW-Authenticate": "Bearer"})
+        limit = access["rate_limit"] if access["rate_limit"] is not None else default_limit
+        decision = limiter.check(access["name"], limit)
+        if not decision.allowed:
+            # Refusals are not audited, so a client over its limit cannot grow the database; warn once instead.
+            if decision.newly_limited:
+                logger.warning("Token %s exceeded its rate limit (%d per minute).", access["name"], limit)
+            raise HTTPException(status_code=429, headers={"Retry-After": str(decision.retry_after)},
+                                detail=f"This token is limited to {limit} requests per minute; "
+                                       f"retry in {decision.retry_after} seconds.")
         request.state.audit_token = access["name"]
         return access
 
@@ -200,7 +217,9 @@ def create_app(database: Path | None = None) -> FastAPI:
     # Every route except /health requires a token; FastAPI reuses the result within a request.
     protected = APIRouter(dependencies=[Depends(caller)],
                           responses={401: {"description": "Missing, unknown, revoked, or expired API token"},
-                                     403: {"description": "The token does not have the scope this route needs"}})
+                                     403: {"description": "The token does not have the scope this route needs"},
+                                     429: {"description": "The token has used up its requests for now; see "
+                                                          "Retry-After"}})
 
     @app.get("/health")
     def health() -> dict:

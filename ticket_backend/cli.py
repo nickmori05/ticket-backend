@@ -71,6 +71,8 @@ def parser() -> argparse.ArgumentParser:
                               help="Grant one scope; repeat for more (default: every scope)")
     token_create.add_argument("--expires-in", type=int, metavar="DAYS",
                               help="Stop the token working after this many days (default: never)")
+    token_create.add_argument("--rate-limit", type=int, metavar="N",
+                              help="Requests per minute, or 0 for no limit (default: the API's TICKETS_RATE_LIMIT)")
     actions.add_parser("list", help="Show tokens with their scopes and whether they are active")
     token_revoke = actions.add_parser("revoke", help="Stop a token from authenticating")
     token_revoke.add_argument("name")
@@ -145,6 +147,8 @@ def display(command: str, result, action: str | None = None) -> None:
     elif action == "create":
         print(f"Token for {result['name']}: {result['token']}")
         print(f"Scopes: {' '.join(result['scopes'])}")
+        if result["rate_limit"] is not None:
+            print(f"Rate limit: {'none' if result['rate_limit'] == 0 else rate_limit_text(result['rate_limit'])}")
         if result["expires_at"]:
             print(f"Expires: {result['expires_at']} UTC")
         print("Store it now; it cannot be shown again.")
@@ -157,9 +161,15 @@ def display(command: str, result, action: str | None = None) -> None:
                 details.append(f"revoked {row['revoked_at']} UTC")
             elif row["expires_at"]:
                 details.append(f"{'expired' if row['state'] == 'expired' else 'expires'} {row['expires_at']} UTC")
+            if row["rate_limit"] is not None:
+                details.append(rate_limit_text(row["rate_limit"]))
             print(f"{row['name']} [{row['state']}] {' '.join(row['scopes'])} ({', '.join(details)})")
     elif action == "revoke":
         print(f"Token {result['name']} revoked.")
+
+
+def rate_limit_text(limit: int) -> str:
+    return "no rate limit" if limit == 0 else f"{limit} requests per minute"
 
 
 def send_notifications(args: argparse.Namespace) -> dict:
@@ -219,7 +229,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "audit":
             result = prune_audit(args.older_than, args.database)
         elif args.action == "create":
-            result = create_token(args.name, args.database, scopes=args.scopes, expires_in_days=args.expires_in)
+            result = create_token(args.name, args.database, scopes=args.scopes, expires_in_days=args.expires_in,
+                                  rate_limit=args.rate_limit)
         elif args.action == "list":
             result = list_tokens(args.database)
         else:

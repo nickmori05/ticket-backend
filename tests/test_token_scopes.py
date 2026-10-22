@@ -31,7 +31,8 @@ class TokenScopeTests(unittest.TestCase):
         self.assertEqual(created["scopes"], list(SCOPES))
         self.assertIsNone(created["expires_at"])
         self.assertEqual(created["state"], "active")
-        self.assertEqual(token_access(created["token"], self.database), {"name": "alice", "scopes": list(SCOPES)})
+        self.assertEqual(token_access(created["token"], self.database),
+                         {"name": "alice", "scopes": list(SCOPES), "rate_limit": None})
 
     def test_scopes_are_deduplicated_in_a_fixed_order(self):
         created = create_token("triage", self.database, scopes=["emails:read", "tickets:read", "emails:read"])
@@ -78,7 +79,8 @@ class TokenScopeTests(unittest.TestCase):
                 INSERT INTO api_tokens (name, token_hash)
                 VALUES ('old', '{hashlib.sha256(token.encode()).hexdigest()}');
             """)
-        self.assertEqual(token_access(token, legacy), {"name": "old", "scopes": list(LEGACY_SCOPES)})
+        self.assertEqual(token_access(token, legacy),
+                         {"name": "old", "scopes": list(LEGACY_SCOPES), "rate_limit": None})
         self.assertNotIn("notifications:read", LEGACY_SCOPES, "Older tokens must not gain newer scopes")
         listed = list_tokens(legacy)[0]
         self.assertEqual((listed["scopes"], listed["expires_at"], listed["state"]),
