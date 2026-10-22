@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import sys
 
+from ticket_backend.audit import list_audit, prune_audit
 from ticket_backend.database import DEFAULT_DATABASE
 from ticket_backend.mailer import DeliveryError, SmtpSender, settings_from_environment
 from ticket_backend.notifications import (
@@ -73,6 +74,15 @@ def parser() -> argparse.ArgumentParser:
     actions.add_parser("list", help="Show tokens with their scopes and whether they are active")
     token_revoke = actions.add_parser("revoke", help="Stop a token from authenticating")
     token_revoke.add_argument("name")
+    audit = commands.add_parser("audit", help="Review or prune the log of API requests")
+    audit_actions = audit.add_subparsers(dest="action", required=True)
+    audit_list = audit_actions.add_parser("list", help="Show recorded API requests, newest first")
+    audit_list.add_argument("--token", metavar="NAME", help="Only requests made by this token")
+    audit_list.add_argument("--ticket", type=int, metavar="ID", help="Only requests about this ticket")
+    audit_list.add_argument("--limit", type=int, default=20)
+    audit_list.add_argument("--offset", type=int, default=0)
+    audit_prune = audit_actions.add_parser("prune", help="Delete recorded requests older than a number of days")
+    audit_prune.add_argument("--older-than", type=int, required=True, metavar="DAYS")
     return root
 
 
@@ -124,6 +134,14 @@ def display(command: str, result, action: str | None = None) -> None:
         print(f"Total: {result['total']}")
         for status, count in result["by_status"].items():
             print(f"{status}: {count}")
+    elif command == "audit" and action == "list":
+        if not result:
+            print("No recorded API requests.")
+        for row in result:
+            ticket = f" (ticket #{row['ticket_id']})" if row["ticket_id"] is not None else ""
+            print(f"{row['created_at']} UTC, {row['token']}: {row['method']} {row['path']} -> {row['status']}{ticket}")
+    elif command == "audit":
+        print(f"Deleted {result['deleted']} recorded API request" + ("." if result["deleted"] == 1 else "s."))
     elif action == "create":
         print(f"Token for {result['name']}: {result['token']}")
         print(f"Scopes: {' '.join(result['scopes'])}")
@@ -196,6 +214,10 @@ def main(argv: list[str] | None = None) -> int:
             result = send_notifications(args)
         elif args.command == "retry-notifications":
             result = retry_notifications(args.database, args.ids or None)
+        elif args.command == "audit" and args.action == "list":
+            result = list_audit(args.database, args.limit, offset=args.offset, token=args.token, ticket_id=args.ticket)
+        elif args.command == "audit":
+            result = prune_audit(args.older_than, args.database)
         elif args.action == "create":
             result = create_token(args.name, args.database, scopes=args.scopes, expires_in_days=args.expires_in)
         elif args.action == "list":
