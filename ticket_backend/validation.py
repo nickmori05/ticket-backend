@@ -26,6 +26,12 @@ def optional_email(email: str | None) -> str | None:
     return email
 
 
+def require_token_name(name: str) -> str:
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
+        raise ValueError("Token name must be 1-64 ASCII letters, digits, dots, underscores, or hyphens.")
+    return name
+
+
 def require_page(limit: int, offset: int) -> None:
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError("Limit must be between 1 and 100.")

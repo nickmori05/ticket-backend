@@ -1,7 +1,7 @@
 """The HTTP API. Run it with `uvicorn ticket_backend.api:app`; every route except /health needs a bearer token.
 
 Each route also needs one scope on that token, and requester emails, including notification recipients, are shown
-only to tokens with emails:read.
+only to tokens with emails:read. Every request made with a valid token is recorded in the audit log.
 """
 
 import logging
@@ -19,6 +19,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from ticket_backend import __version__
+from ticket_backend.api_audit import record_requests
+from ticket_backend.audit import list_audit
 from ticket_backend.database import DEFAULT_DATABASE
 from ticket_backend.notifications import (
     NotificationNotFoundError, NotificationStateError, get_notification, list_notifications, retry_notifications,
@@ -106,6 +108,18 @@ class NotificationOutput(BaseModel):
     created_at: str
 
 
+class AuditOutput(BaseModel):
+    id: int
+    token: Annotated[str, Field(description="Name of the token that made the request.")]
+    method: str
+    path: Annotated[str, Field(description="Requested path, without the query string.")]
+    route: Annotated[str | None, Field(description="The matched route, such as /tickets/{ticket_id}.")]
+    ticket_id: Annotated[int | None, Field(description="The ticket named in the path, or created by the request.")]
+    status: Annotated[int, Field(description="HTTP status code of the response.")]
+    client: Annotated[str | None, Field(description="Address of the client, or of the proxy in front of it.")]
+    created_at: str
+
+
 class RetryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
@@ -146,11 +160,16 @@ def create_app(database: Path | None = None) -> FastAPI:
     app.add_exception_handler(sqlite3.Error, unavailable_storage)
     app.add_exception_handler(OSError, unavailable_storage)
 
-    def caller(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> dict:
+    record_requests(app, database)
+
+    def caller(
+        request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ) -> dict:
         access = token_access(credentials.credentials if credentials else None, database)
         if access is None:
             raise HTTPException(status_code=401, detail="A valid API token is required.",
                                 headers={"WWW-Authenticate": "Bearer"})
+        request.state.audit_token = access["name"]
         return access
 
     def requires(scope: str):
@@ -164,6 +183,7 @@ def create_app(database: Path | None = None) -> FastAPI:
 
     reader, writer = requires("tickets:read"), requires("tickets:write")
     outbox_reader, outbox_writer = requires("notifications:read"), requires("notifications:write")
+    auditor = requires("audit:read")
 
     def shown(ticket: dict, access: dict) -> dict:
         return ticket if "emails:read" in access["scopes"] else {**ticket, "email": None}
@@ -190,6 +210,7 @@ def create_app(database: Path | None = None) -> FastAPI:
                     responses={409: {"description": "This token already used the key for different ticket content"}})
     def submit(
         payload: TicketInput,
+        request: Request,
         response: Response,
         access: Annotated[dict, Depends(writer)],
         idempotency_key: Annotated[str | None, Header(
@@ -200,6 +221,7 @@ def create_app(database: Path | None = None) -> FastAPI:
         ticket = create_ticket(payload.title, payload.message, database,
                                idempotency_key=idempotency_key, author=access["name"], email=payload.email)
         response.headers["Location"] = f"/tickets/{ticket['id']}"
+        request.state.audit_ticket_id = ticket["id"]
         return shown(ticket, access)
 
     @protected.get("/tickets", response_model=list[TicketOutput])
@@ -259,6 +281,15 @@ def create_app(database: Path | None = None) -> FastAPI:
     def retry(access: Annotated[dict, Depends(outbox_writer)], payload: RetryInput | None = None):
         ids = payload.ids if payload is not None else None
         return [shown_notification(row, access) for row in retry_notifications(database, ids)]
+
+    @protected.get("/audit", response_model=list[AuditOutput], dependencies=[Depends(auditor)])
+    def audit_log(
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        token: Annotated[str | None, Query(max_length=64, description="Only requests made by this token")] = None,
+        ticket_id: Annotated[int | None, Query(gt=0, description="Only requests about this ticket")] = None,
+    ):
+        return list_audit(database, limit, offset=offset, token=token, ticket_id=ticket_id)
 
     app.include_router(protected)
     return app

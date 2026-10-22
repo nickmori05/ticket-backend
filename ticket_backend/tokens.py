@@ -7,14 +7,16 @@ from collections.abc import Iterable
 from contextlib import closing
 import hashlib
 from pathlib import Path
-import re
 import secrets
 import sqlite3
 
 from ticket_backend.database import DEFAULT_DATABASE, connect
+from ticket_backend.validation import require_token_name
 
 
-SCOPES = ("tickets:read", "tickets:write", "emails:read", "notifications:read", "notifications:write")
+SCOPES = (
+    "tickets:read", "tickets:write", "emails:read", "notifications:read", "notifications:write", "audit:read",
+)
 # Tokens created before scopes existed have no stored scopes and keep the full access they always had.
 LEGACY_SCOPES = ("tickets:read", "tickets:write", "emails:read")
 MAX_EXPIRY_DAYS = 3650
@@ -26,12 +28,6 @@ _COLUMNS = """id, name, scopes, created_at, expires_at, revoked_at,
 
 class TokenNotFoundError(LookupError):
     pass
-
-
-def _token_name(name: str) -> str:
-    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
-        raise ValueError("Token name must be 1-64 ASCII letters, digits, dots, underscores, or hyphens.")
-    return name
 
 
 def _token_scopes(scopes: Iterable[str] | None) -> tuple[str, ...]:
@@ -73,7 +69,7 @@ def create_token(
 
     Without scopes the token gets every scope. Without an expiry it lasts until it is revoked.
     """
-    name = _token_name(name)
+    name = require_token_name(name)
     scopes = _token_scopes(scopes)
     if expires_in_days is not None and (
         type(expires_in_days) is not int or not 1 <= expires_in_days <= MAX_EXPIRY_DAYS
@@ -102,7 +98,7 @@ def list_tokens(database: Path = DEFAULT_DATABASE) -> list[dict]:
 
 def revoke_token(name: str, database: Path = DEFAULT_DATABASE) -> dict:
     """Stop a token from authenticating. Revoking it again keeps the original revocation time."""
-    name = _token_name(name)
+    name = require_token_name(name)
     with closing(connect(database)) as connection:
         with connection:
             connection.execute(

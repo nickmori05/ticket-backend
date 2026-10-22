@@ -75,3 +75,20 @@ CREATE TABLE IF NOT EXISTS ticket_notifications (
 
 CREATE INDEX IF NOT EXISTS ticket_notifications_due ON ticket_notifications(status, next_attempt_at, id);
 CREATE INDEX IF NOT EXISTS ticket_notifications_ticket_id ON ticket_notifications(ticket_id, id);
+
+-- One row per API request made with a valid token. Token names are unique and never reused, so they identify
+-- the caller for good. ticket_id has no foreign key because requests for missing tickets are recorded too.
+CREATE TABLE IF NOT EXISTS api_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    route TEXT,
+    ticket_id INTEGER,
+    status INTEGER NOT NULL,
+    client TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS api_audit_log_token ON api_audit_log(token, id);
+CREATE INDEX IF NOT EXISTS api_audit_log_ticket_id ON api_audit_log(ticket_id, id);
