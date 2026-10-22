@@ -10,7 +10,8 @@ filed them by email.
 - **CLI** using only the standard library: create, search, and update tickets, with
   text or JSON output and stable exit codes.
 - **HTTP API** built with FastAPI, protected by bearer tokens that are stored hashed,
-  limited to scopes, optionally expiring, and managed from the terminal.
+  limited to scopes and a number of requests per minute, optionally expiring, and
+  managed from the terminal.
 - **Safe retries**: an optional idempotency key, private to the token that sent it,
   makes a repeated submission return the original ticket instead of creating a duplicate.
 - **Audit log** of every request made with a token: which token, what route, which
@@ -70,7 +71,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `outbox [--status S] [--ticket ID] [--limit N] [--offset N]` | List queued notifications, oldest first |
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
 | `retry-notifications [ID ...]` | Requeue failed notifications |
-| `token create NAME [--scope S ...] [--expires-in DAYS]` | Create an API token, shown once |
+| `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
 | `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
 | `audit prune --older-than DAYS` | Delete recorded API requests older than 1 to 3650 days |
@@ -135,7 +136,8 @@ curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
 
 A missing, unknown, revoked, or expired token returns 401 before any ticket is read,
 and a token without the route's scope returns 403 with
-`WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. A missing ticket
+`WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. A token over its
+[rate limit](#rate-limits) returns 429 with `Retry-After`. A missing ticket
 or notification returns 404, a reused idempotency key with different content or a
 retry of a notification that is not `failed` 409, invalid fields 422, and a storage
 failure 503 without exposing file paths. Unknown JSON fields are rejected. Ticket creation, status changes, and comments record the
@@ -173,6 +175,33 @@ in a later version. Tokens created before scopes existed keep `tickets:read`,
 `tickets:write`, and `emails:read` and never expire; create a new token to use the
 notification or audit endpoints.
 
+### Rate limits
+
+Each token may make up to its limit of requests in a burst, and then that many per
+minute: its allowance refills continuously, so a token limited to 60 regains one
+request each second. A request over the limit returns 429 with `Retry-After` giving
+the whole seconds until the next one would be accepted, and the route does not run.
+The limit is checked right after the token, before its scope, so requests to routes
+the token has no scope for count too; requests refused with 429 do not.
+
+Tokens use the API's `TICKETS_RATE_LIMIT` (default 120 requests per minute; `0` turns
+the default off) unless they were created with their own:
+
+```sh
+python3 tickets.py token create web-form --scope tickets:write --rate-limit 10
+python3 tickets.py token create nightly-import --rate-limit 0   # no limit
+TICKETS_RATE_LIMIT=300 python -m uvicorn ticket_backend.api:app --host 127.0.0.1 --port 8000
+```
+
+A token's limit is fixed when it is created, like its scopes. Tokens from earlier
+versions use the default. Requests without a valid token and `/health` are not
+limited. An invalid `TICKETS_RATE_LIMIT` stops the API from starting.
+
+Counts are kept in the API process's memory, so they start again when it restarts,
+and each process counts separately: run one API process (as Docker Compose does), or
+expect each of `uvicorn --workers N` to allow the full limit. The first refused
+request after an accepted one is logged as a warning naming the token.
+
 ## Audit log
 
 Every request made with a valid token is recorded once its response is decided: the
@@ -180,7 +209,8 @@ token's name, the method, the path without its query string, the matched route (
 as `/tickets/{ticket_id}`), the ticket it named or created, the status code, the
 client address, and the time in UTC. Refused and failed requests are recorded too, so
 a 403 shows a token trying a route it lacks the scope for, and a 404 shows it probing
-for tickets. Requests without a valid token, `/health`, and the docs are not recorded.
+for tickets. Requests without a valid token or over the token's rate limit, `/health`,
+and the docs are not recorded.
 
 ```sh
 python3 tickets.py audit list --token web-form
@@ -205,6 +235,7 @@ limit:
 | Variable | Used by | Meaning |
 | --- | --- | --- |
 | `TICKETS_DATABASE` | API | SQLite file; defaults to `tickets.db` in the project folder. The CLI uses `--database`. |
+| `TICKETS_RATE_LIMIT` | API | Requests per minute for each token without its own limit, default 120; `0` for none |
 | `TICKETS_PORT` | Docker Compose | Host port for the API, default 8000 |
 | `TICKETS_SMTP_HOST` | `send-notifications` | Mail server host name or IP address (required) |
 | `TICKETS_SMTP_FROM` | `send-notifications` | Sender, such as `Support <support@example.com>` (required) |
@@ -296,6 +327,7 @@ ticket_backend/
   tickets.py                tickets, status history, comments, statistics
   submissions.py            idempotency keys, scoped to each token
   tokens.py                 token creation, revocation, and authentication
+  ratelimit.py              per-token request limits kept in memory
   notifications.py          outbox queries, delivery, and retries
   mailer.py                 SMTP settings and sender
   validation.py             input checks shared by the storage modules
@@ -348,6 +380,13 @@ request's own transaction commits, a storage failure while recording is logged a
 the response is still returned: the change has already happened, and failing the
 request would invite a retry.
 
+**Rate limits.** Each token has a bucket in memory holding up to its limit, refilled
+at that many requests per minute, behind one lock so concurrent requests cannot
+overspend it. Buckets are keyed by token name, so there is at most one per token. The
+check runs after authentication, because an unauthenticated request has no token to
+charge, and before the audit log marks the request, so refusals are not written: a
+client over its limit costs a token lookup but adds nothing to the database.
+
 **Outbox.** Notifications are written in the same transaction as the history entry
 they describe, so one exists exactly when the other does, and delivery happens later
 and separately. Each attempt is counted and its retry scheduled before sending, so a
@@ -373,12 +412,14 @@ python scripts/smoke_docker.py   # needs Docker
 
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, idempotent
-retries and their per-token keys, token authentication, scopes, and expiry, the audit log, the CLI
+retries and their per-token keys, token authentication, scopes, expiry, and rate limits,
+the audit log, the CLI
 and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
 on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
 builds the image and checks that the API and CLI containers share data, that a
 read-only token cannot write, see emails, or read the outbox or audit log, that the
-CLI sees requests the API recorded in the audit log, that the API sees
+CLI sees requests the API recorded in the audit log, that a token over its rate limit
+gets 429 and is not audited, that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the image runs as a
@@ -391,9 +432,12 @@ test.
 
 - SQLite serializes writers, so this suits a small team or local use, not a busy
   shared service.
-- Scopes are coarse (read, write, and emails across all tickets), cannot be changed
-  after a token is created, and there are no rate limits. Tokens travel in plain text
+- Scopes are coarse (read, write, and emails across all tickets), and neither scopes
+  nor rate limits can be changed after a token is created. Tokens travel in plain text
   over HTTP, so keep the API on loopback or behind HTTPS.
+- Rate limits are per process and reset on restart, so they do not hold across several
+  API processes or hosts. Requests without a valid token are not limited; put a proxy
+  that limits by address in front of the API if it is exposed.
 - Authors are token names, not people, and terminal changes have no author (shown as
   `local`). Entries from before attribution existed have none either.
 - Idempotency keys never expire, and belong to a token's name, so a replacement

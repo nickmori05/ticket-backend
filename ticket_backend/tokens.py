@@ -1,6 +1,6 @@
 """API tokens. Only SHA-256 hashes are stored; the token itself is shown once, when it is created.
 
-Each token carries a fixed set of scopes and an optional expiry, both chosen when it is created.
+Each token carries a fixed set of scopes, an optional expiry, and an optional rate limit, all chosen at creation.
 """
 
 from collections.abc import Iterable
@@ -11,6 +11,7 @@ import secrets
 import sqlite3
 
 from ticket_backend.database import DEFAULT_DATABASE, connect
+from ticket_backend.ratelimit import require_rate_limit
 from ticket_backend.validation import require_token_name
 
 
@@ -20,7 +21,7 @@ SCOPES = (
 # Tokens created before scopes existed have no stored scopes and keep the full access they always had.
 LEGACY_SCOPES = ("tickets:read", "tickets:write", "emails:read")
 MAX_EXPIRY_DAYS = 3650
-_COLUMNS = """id, name, scopes, created_at, expires_at, revoked_at,
+_COLUMNS = """id, name, scopes, rate_limit, created_at, expires_at, revoked_at,
     CASE WHEN revoked_at IS NOT NULL THEN 'revoked'
          WHEN expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP THEN 'expired'
          ELSE 'active' END AS state"""
@@ -64,10 +65,12 @@ def create_token(
     *,
     scopes: Iterable[str] | None = None,
     expires_in_days: int | None = None,
+    rate_limit: int | None = None,
 ) -> dict:
     """Create a named token and return it with its plain value, which is not stored and cannot be shown again.
 
-    Without scopes the token gets every scope. Without an expiry it lasts until it is revoked.
+    Without scopes the token gets every scope. Without an expiry it lasts until it is revoked. Without a rate limit
+    it uses the server's default; a limit of 0 means none.
     """
     name = require_token_name(name)
     scopes = _token_scopes(scopes)
@@ -75,14 +78,17 @@ def create_token(
         type(expires_in_days) is not int or not 1 <= expires_in_days <= MAX_EXPIRY_DAYS
     ):
         raise ValueError(f"Expiry must be a whole number of days from 1 to {MAX_EXPIRY_DAYS}.")
+    if rate_limit is not None:
+        require_rate_limit(rate_limit)
     token = "tkt_" + secrets.token_urlsafe(32)
     with closing(connect(database)) as connection:
         with connection:
             try:
                 cursor = connection.execute(
-                    """INSERT INTO api_tokens (name, token_hash, scopes, expires_at)
-                       VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', ?) END)""",
-                    (name, _token_hash(token), " ".join(scopes), expires_in_days, f"+{expires_in_days} days"),
+                    """INSERT INTO api_tokens (name, token_hash, scopes, rate_limit, expires_at)
+                       VALUES (?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', ?) END)""",
+                    (name, _token_hash(token), " ".join(scopes), rate_limit, expires_in_days,
+                     f"+{expires_in_days} days"),
                 )
             except sqlite3.IntegrityError:
                 raise ValueError(f"A token named {name} already exists.") from None
@@ -91,7 +97,7 @@ def create_token(
 
 
 def list_tokens(database: Path = DEFAULT_DATABASE) -> list[dict]:
-    """Return every token's name, scopes, state, and creation, expiry, and revocation times, without hashes."""
+    """Return every token's name, scopes, rate limit, state, and creation, expiry, and revocation times."""
     with closing(connect(database)) as connection:
         return [_token_row(row) for row in connection.execute(f"SELECT {_COLUMNS} FROM api_tokens ORDER BY id")]
 
@@ -112,16 +118,19 @@ def revoke_token(name: str, database: Path = DEFAULT_DATABASE) -> dict:
 
 
 def token_access(token: str | None, database: Path = DEFAULT_DATABASE) -> dict | None:
-    """Return the name and scopes of an active token, or None when it is missing, unknown, revoked, or expired."""
+    """Return the name, scopes, and rate limit of an active token, or None when it is missing, unknown, revoked, or
+    expired. A rate limit of None means the server's default."""
     if not isinstance(token, str) or not 1 <= len(token) <= 200:
         return None
     with closing(connect(database)) as connection:
         row = connection.execute(
-            """SELECT name, scopes FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL
+            """SELECT name, scopes, rate_limit FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL
                AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)""",
             (_token_hash(token),),
         ).fetchone()
-    return {"name": row["name"], "scopes": _stored_scopes(row["scopes"])} if row is not None else None
+    if row is None:
+        return None
+    return {"name": row["name"], "scopes": _stored_scopes(row["scopes"]), "rate_limit": row["rate_limit"]}
 
 
 def authenticate(token: str | None, database: Path = DEFAULT_DATABASE) -> str | None:

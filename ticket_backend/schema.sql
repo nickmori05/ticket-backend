@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     token_hash TEXT NOT NULL UNIQUE,
     -- Space-separated scope names; NULL for tokens created before scopes existed, which keep full access.
     scopes TEXT,
+    -- Requests per minute; NULL uses the server's TICKETS_RATE_LIMIT, and 0 means no limit.
+    rate_limit INTEGER,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP,
     revoked_at TIMESTAMP
