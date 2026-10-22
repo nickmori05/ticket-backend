@@ -63,8 +63,8 @@ class IdempotencyApiTests(unittest.TestCase):
         self.assertEqual(list_tickets(self.database), [])
         self.assertEqual(self.client.post("/tickets", json=self.payload, headers=self.headers).status_code, 201)
 
-    def test_http_retry_finds_a_submission_created_through_shared_storage(self):
-        first = create_ticket("Login", "Cannot sign in", self.database, idempotency_key="submission-1")
+    def test_http_retry_finds_a_submission_stored_for_the_same_token(self):
+        first = create_ticket("Login", "Cannot sign in", self.database, idempotency_key="submission-1", author="tests")
         response = self.client.post("/tickets", json=self.payload, headers={"idempotency-key": "submission-1"})
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json(), first)

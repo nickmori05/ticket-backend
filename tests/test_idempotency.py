@@ -24,7 +24,7 @@ class IdempotencyTests(unittest.TestCase):
     def counts(self):
         with closing(connect(self.database)) as connection:
             return tuple(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                         for table in ("tickets", "ticket_events", "ticket_submissions"))
+                         for table in ("tickets", "ticket_events", "ticket_submission_keys"))
 
     def test_retry_after_reopening_returns_original_ticket_and_history(self):
         first = self.create(title=" Login ", message=" Cannot sign in ")
@@ -98,7 +98,7 @@ class IdempotencyTests(unittest.TestCase):
     def test_failed_submission_record_rolls_back_ticket_and_history(self):
         with closing(connect(self.database)) as connection:
             connection.executescript("""
-                CREATE TRIGGER reject_submission BEFORE INSERT ON ticket_submissions
+                CREATE TRIGGER reject_submission BEFORE INSERT ON ticket_submission_keys
                 BEGIN SELECT RAISE(ABORT, 'Simulated submission failure'); END;
             """)
         with self.assertRaises(sqlite3.IntegrityError):
@@ -113,7 +113,7 @@ class IdempotencyTests(unittest.TestCase):
     def test_existing_database_is_extended_without_rewriting_tickets(self):
         first = create_ticket("Existing", "Keep me", self.database)
         with closing(connect(self.database)) as connection:
-            connection.execute("DROP TABLE ticket_submissions")
+            connection.execute("DROP TABLE ticket_submission_keys")
         second = self.create()
         self.assertEqual(self.create(), second)
         self.assertEqual(get_ticket(first["id"], self.database), first)

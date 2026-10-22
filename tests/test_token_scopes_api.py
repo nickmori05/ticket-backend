@@ -85,8 +85,8 @@ class TokenScopeApiTests(unittest.TestCase):
                          ["pat@example.com", "pat@example.com", "sam@example.com"])
         support = self.bearer("support", ["tickets:read", "tickets:write", "emails:read"])
         self.assertEqual(self.client.get(url, headers=support).json()["email"], "pat@example.com")
-        self.assertEqual(self.client.post("/tickets", json=payload, headers={**support, "Idempotency-Key": "k1"})
-                         .json()["email"], "sam@example.com")
+        self.assertEqual(self.client.get(f"/tickets/{created.json()['id']}", headers=support).json()["email"],
+                         "sam@example.com")
 
     def test_emails_scope_alone_grants_no_ticket_access(self):
         headers = self.bearer("emails", ["emails:read"])

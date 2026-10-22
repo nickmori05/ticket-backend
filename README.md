@@ -11,8 +11,8 @@ filed them by email.
   text or JSON output and stable exit codes.
 - **HTTP API** built with FastAPI, protected by bearer tokens that are stored hashed,
   limited to scopes, optionally expiring, and managed from the terminal.
-- **Safe retries**: an optional idempotency key makes a repeated submission return the
-  original ticket instead of creating a duplicate.
+- **Safe retries**: an optional idempotency key, private to the token that sent it,
+  makes a repeated submission return the original ticket instead of creating a duplicate.
 - **Email notifications** through a transactional outbox, delivered over SMTP with
   retries and backoff, and inspectable and retryable over HTTP.
 - **Docker Compose** setup that runs the API and CLI against one persistent volume.
@@ -259,6 +259,7 @@ ticket_backend/
   cli.py                    argument parsing, text and JSON output, exit codes
   api.py                    FastAPI app, request and response models, token check
   tickets.py                tickets, status history, comments, statistics
+  submissions.py            idempotency keys, scoped to each token
   tokens.py                 token creation, revocation, and authentication
   notifications.py          outbox queries, delivery, and retries
   mailer.py                 SMTP settings and sender
@@ -278,12 +279,21 @@ agree. SQLite assigns IDs on insert, and writers wait up to five seconds for the
 before failing with a storage error.
 
 **Idempotent submissions.** A key (`--idempotency-key` or the `Idempotency-Key`
-header, 1–128 ASCII letters, digits, dots, underscores, or hyphens) is a primary key
-in `ticket_submissions`, saved in the same transaction as the ticket together with
-the original response. Reusing a key with the same title, message, and email returns
-that response, with 201 and the same `Location` over HTTP, even if the ticket has
-since changed. Different content returns 409 or exit code 3, and an invalid request
-does not reserve its key. The CLI and API share keys when they share a database.
+header, 1–128 ASCII letters, digits, dots, underscores, or hyphens) is saved in
+`ticket_submission_keys` together with the caller and the original response, in the
+same transaction as the ticket. Reusing a key with the same title, message, and email
+returns that response, with 201 and the same `Location` over HTTP, even if the ticket
+has since changed. Different content returns 409 or exit code 3, and an invalid
+request does not reserve its key.
+
+Keys belong to the caller: each token has its own, identified by its name, and the
+terminal has one set shared by every CLI user. Another token sending the same key gets
+a new ticket, so it can neither replay someone else's submission nor learn from a 409
+what they submitted, such as an email it cannot see. Keys saved by earlier versions
+stay in `ticket_submissions` and are not rewritten. Each belongs to the token recorded
+as its ticket's creator; keys whose ticket has no recorded creator, because it came
+from the terminal or predates attribution, stay shared by every caller as before, so
+no retry in flight during an upgrade creates a duplicate.
 
 **Authentication.** Tokens are 256-bit random values. Only their SHA-256 hashes are
 stored, so a lost token cannot be recovered, only revoked and replaced under a new
@@ -320,13 +330,14 @@ python scripts/smoke_docker.py   # needs Docker
 
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, idempotent
-retries, token authentication, scopes, and expiry, the CLI and HTTP interfaces, and
-notification delivery. SMTP tests talk to a small SMTP server on 127.0.0.1 inside the test process
-(`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
+retries and their per-token keys, token authentication, scopes, and expiry, the CLI
+and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
+on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
 builds the image and checks that the API and CLI containers share data, that a
 read-only token cannot write, see emails, or read the outbox, that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
-keys survive container recreation, that the image runs as a
+keys survive container recreation, that the CLI's keys are separate from the API
+token's, that the image runs as a
 non-root user, and that `send-notifications` delivers through the image. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
 Actions runs ruff, the unit tests on Python 3.10, 3.11, and 3.14, and the Docker smoke
@@ -341,7 +352,9 @@ test.
   over HTTP, so keep the API on loopback or behind HTTPS.
 - Authors are token names, not people, and terminal changes have no author (shown as
   `local`). Entries from before attribution existed have none either.
-- Idempotency keys are global rather than scoped to a token, and never expire.
+- Idempotency keys never expire, and belong to a token's name, so a replacement
+  token cannot replay keys sent by the one it replaces. Keys saved by earlier versions
+  for tickets with no recorded creator remain shared by every caller.
 - Comments cannot be edited or deleted, and a ticket's email cannot be changed.
 - Requester emails are stored in plain text in the database, and hidden only from API
   tokens without `emails:read`. An address an SMTP server quotes in a different form

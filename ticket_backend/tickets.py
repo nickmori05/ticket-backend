@@ -1,12 +1,11 @@
 """Tickets, their status history, and comments."""
 
 from contextlib import closing
-import json
 from pathlib import Path
-import re
 
 from ticket_backend.database import DEFAULT_DATABASE, connect
 from ticket_backend.notifications import queue_notification
+from ticket_backend.submissions import require_key, save_submission, saved_submission
 from ticket_backend.validation import optional_author, optional_email, require_id, require_page, require_text
 
 
@@ -32,27 +31,20 @@ def create_ticket(
 ) -> dict:
     """Create a ticket with its initial history entry, or replay the saved response for a reused key.
 
-    Raises IdempotencyConflictError when the key was already used for different content.
+    Keys belong to the author, so each token, and the terminal (no author), has its own.
+    Raises IdempotencyConflictError when this author already used the key for different content.
     """
     title = require_text(title, "Title", 120)
     message = require_text(message, "Message", 10_000)
     author = optional_author(author)
     email = optional_email(email)
-    if idempotency_key is not None and (
-        not isinstance(idempotency_key, str)
-        or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", idempotency_key)
-    ):
-        raise ValueError("Idempotency key must be 1-128 ASCII letters, digits, dots, underscores, or hyphens.")
+    idempotency_key = require_key(idempotency_key)
     with closing(connect(database)) as connection:
         with connection:
             if idempotency_key is not None:
                 connection.execute("BEGIN IMMEDIATE")
-                previous = connection.execute(
-                    "SELECT response_json FROM ticket_submissions WHERE idempotency_key = ?",
-                    (idempotency_key,),
-                ).fetchone()
-                if previous is not None:
-                    ticket = json.loads(previous["response_json"])
+                ticket = saved_submission(connection, idempotency_key, author)
+                if ticket is not None:
                     # Responses saved before tickets had an email have no email key.
                     if ticket["title"] != title or ticket["message"] != message or ticket.get("email") != email:
                         raise IdempotencyConflictError("Idempotency key was already used for different ticket content.")
@@ -72,10 +64,7 @@ def create_ticket(
                                f"We received your ticket #{row['id']}. Its status is open.\n\n{message}")
             ticket = dict(row)
             if idempotency_key is not None:
-                connection.execute(
-                    "INSERT INTO ticket_submissions (idempotency_key, ticket_id, response_json) VALUES (?, ?, ?)",
-                    (idempotency_key, ticket["id"], json.dumps(ticket, ensure_ascii=False)),
-                )
+                save_submission(connection, idempotency_key, author, ticket)
         return ticket
 
 

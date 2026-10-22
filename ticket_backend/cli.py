@@ -29,7 +29,8 @@ def parser() -> argparse.ArgumentParser:
     create = commands.add_parser("create", help="Submit a new ticket")
     create.add_argument("--title", help="Prompted for when omitted")
     create.add_argument("--message", help="Prompted for when omitted")
-    create.add_argument("--idempotency-key", help="Reuse this key when retrying the same submission")
+    create.add_argument("--idempotency-key",
+                        help="Reuse this key when retrying the same submission (separate from API tokens' keys)")
     create.add_argument("--email", help="Requester address to notify of status changes")
     show = commands.add_parser("show", help="Retrieve one ticket")
     show.add_argument("id", type=int)
