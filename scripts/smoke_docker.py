@@ -102,6 +102,17 @@ def main() -> int:
         status, audit_log = request(address, f"/audit?token=smoke&ticket_id={http_id}")
         assert status == 200 and [(row["method"], row["status"]) for row in audit_log] == \
             [("PATCH", 200), ("POST", 201), ("POST", 201)], "API did not show the token's audited requests"
+        limited = command("token", "create", "smoke-limited", "--scope", "tickets:read", "--rate-limit", "2")["token"]
+        for _ in range(2):
+            assert request(address, "/stats", bearer=limited)[0] == 200, "Token was refused within its rate limit"
+        try:
+            request(address, "/stats", bearer=limited)
+            raise AssertionError("API accepted a request over the token's rate limit")
+        except HTTPError as error:
+            assert error.code == 429 and error.headers["Retry-After"] == "30", \
+                f"Expected 429 with Retry-After: 30, got {error.code} {error.headers.get('Retry-After')}"
+        assert [row["status"] for row in command("audit", "list", "--token", "smoke-limited")] == [200, 200], \
+            "Rate-limited requests were written to the audit log"
         try:
             request(address, "/audit", bearer=reader["token"])
             raise AssertionError("API showed the audit log to a token without audit:read")
@@ -159,9 +170,9 @@ def main() -> int:
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens with scopes, status attribution, the audit log, notification "
-              "outbox, its API, and SMTP delivery, persistent per-token retries, container recreation, and non-root "
-              "execution passed.")
+        print("Docker CLI/API sharing, API tokens with scopes, status attribution, the audit log, rate limits, "
+              "notification outbox, its API, and SMTP delivery, persistent per-token retries, container recreation, "
+              "and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)
