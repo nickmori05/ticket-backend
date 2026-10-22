@@ -13,6 +13,8 @@ filed them by email.
   limited to scopes, optionally expiring, and managed from the terminal.
 - **Safe retries**: an optional idempotency key, private to the token that sent it,
   makes a repeated submission return the original ticket instead of creating a duplicate.
+- **Audit log** of every request made with a token: which token, what route, which
+  ticket, and the result, readable over HTTP by tokens with `audit:read`.
 - **Email notifications** through a transactional outbox, delivered over SMTP with
   retries and backoff, and inspectable and retryable over HTTP.
 - **Docker Compose** setup that runs the API and CLI against one persistent volume.
@@ -70,6 +72,8 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `retry-notifications [ID ...]` | Requeue failed notifications |
 | `token create NAME [--scope S ...] [--expires-in DAYS]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
+| `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
+| `audit prune --older-than DAYS` | Delete recorded API requests older than 1 to 3650 days |
 
 Global options go before the command: `--database PATH` selects another SQLite
 file, and `--json` prints machine-readable output.
@@ -115,6 +119,7 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /notifications` | `notifications:read` | Outbox, oldest first, with optional `status`, `ticket_id`, `limit`, and `offset` |
 | `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
 | `POST /notifications/retry` | `notifications:write` | Requeue failed notifications from JSON `ids`, or all failed ones without a body |
+| `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `limit`, and `offset` |
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
@@ -145,6 +150,7 @@ name of the token that made them.
 | `emails:read` | Seeing requester emails; without it, `email` and `recipient` are always `null` in responses |
 | `notifications:read` | Reading the outbox, including subjects and bodies, which repeat ticket titles, messages, and notes |
 | `notifications:write` | Requeueing failed notifications |
+| `audit:read` | Reading the audit log of every token's requests |
 
 A token created without `--scope` gets every scope. Grant only what a client needs,
 and add `--expires-in DAYS` (1 to 3650) for a token that should stop working on its
@@ -165,7 +171,34 @@ grants nothing by itself.
 A token keeps exactly the scopes it was created with, so it never gains a scope added
 in a later version. Tokens created before scopes existed keep `tickets:read`,
 `tickets:write`, and `emails:read` and never expire; create a new token to use the
-notification endpoints.
+notification or audit endpoints.
+
+## Audit log
+
+Every request made with a valid token is recorded once its response is decided: the
+token's name, the method, the path without its query string, the matched route (such
+as `/tickets/{ticket_id}`), the ticket it named or created, the status code, the
+client address, and the time in UTC. Refused and failed requests are recorded too, so
+a 403 shows a token trying a route it lacks the scope for, and a 404 shows it probing
+for tickets. Requests without a valid token, `/health`, and the docs are not recorded.
+
+```sh
+python3 tickets.py audit list --token web-form
+python3 tickets.py audit list --ticket 1
+curl -H "Authorization: Bearer $TICKETS_TOKEN" 'http://127.0.0.1:8000/audit?token=web-form&limit=50'
+```
+
+Query strings are left out because `search` can hold any text a client sent, and
+nothing in a path is an email. Reading the log is recorded like any other request.
+Rows are never changed; `audit prune --older-than DAYS` deletes those older than the
+given number of days, so run it on a schedule to keep the log from growing without
+limit:
+
+```text
+0 3 * * * cd /path/to/ticket-backend && python3 tickets.py audit prune --older-than 90
+```
+
+`audit:read` shows what every token has done, so grant it only to administrators.
 
 ## Configuration
 
@@ -258,6 +291,8 @@ tickets.py                  CLI launcher (python3 tickets.py ...)
 ticket_backend/
   cli.py                    argument parsing, text and JSON output, exit codes
   api.py                    FastAPI app, request and response models, token check
+  api_audit.py              middleware that records each authenticated request
+  audit.py                  audit log storage, listing, and pruning
   tickets.py                tickets, status history, comments, statistics
   submissions.py            idempotency keys, scoped to each token
   tokens.py                 token creation, revocation, and authentication
@@ -305,6 +340,14 @@ Emails are removed from responses in the API layer, so the CLI, notifications, a
 idempotent replays still see the stored address. Tokens are created and revoked only
 from the terminal, because anyone who can run the CLI can already open the database.
 
+**Audit log.** The token check stores the token's name on the request, and a
+middleware writes one row after the response is decided, in its own transaction, so
+it records the real status code without checking the token again. A route that
+creates a ticket also stores the new ID. Because the row is written after the
+request's own transaction commits, a storage failure while recording is logged and
+the response is still returned: the change has already happened, and failing the
+request would invite a retry.
+
 **Outbox.** Notifications are written in the same transaction as the history entry
 they describe, so one exists exactly when the other does, and delivery happens later
 and separately. Each attempt is counted and its retry scheduled before sending, so a
@@ -330,11 +373,12 @@ python scripts/smoke_docker.py   # needs Docker
 
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, idempotent
-retries and their per-token keys, token authentication, scopes, and expiry, the CLI
+retries and their per-token keys, token authentication, scopes, and expiry, the audit log, the CLI
 and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
 on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
 builds the image and checks that the API and CLI containers share data, that a
-read-only token cannot write, see emails, or read the outbox, that the API sees
+read-only token cannot write, see emails, or read the outbox or audit log, that the
+CLI sees requests the API recorded in the audit log, that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the image runs as a
@@ -355,6 +399,10 @@ test.
 - Idempotency keys never expire, and belong to a token's name, so a replacement
   token cannot replay keys sent by the one it replaces. Keys saved by earlier versions
   for tickets with no recorded creator remain shared by every caller.
+- The audit log is written after each request, not in the same transaction, so a
+  crash or storage failure between the two leaves a completed request unrecorded.
+  Requests without a valid token are not recorded, the client address is the proxy's
+  when one is in front of the API, and old rows are deleted only by `audit prune`.
 - Comments cannot be edited or deleted, and a ticket's email cannot be changed.
 - Requester emails are stored in plain text in the database, and hidden only from API
   tokens without `emails:read`. An address an SMTP server quotes in a different form
