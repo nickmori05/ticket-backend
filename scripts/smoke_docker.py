@@ -95,6 +95,18 @@ def main() -> int:
         except HTTPError as error:
             assert error.code == 403, f"Expected 403 for a read-only token, got {error.code}"
         request(address, f"/tickets/{http_id}/status", "PATCH", {"status": "closed", "note": "Done"})
+        audited = [(row["method"], row["route"], row["ticket_id"], row["status"])
+                   for row in command("audit", "list", "--token", "smoke-reader")]
+        assert audited == [("POST", "/tickets", None, 403), ("GET", "/tickets/{ticket_id}", int(http_id), 200)], \
+            f"CLI did not see the reader's requests in the audit log: {audited}"
+        status, audit_log = request(address, f"/audit?token=smoke&ticket_id={http_id}")
+        assert status == 200 and [(row["method"], row["status"]) for row in audit_log] == \
+            [("PATCH", 200), ("POST", 201), ("POST", 201)], "API did not show the token's audited requests"
+        try:
+            request(address, "/audit", bearer=reader["token"])
+            raise AssertionError("API showed the audit log to a token without audit:read")
+        except HTTPError as error:
+            assert error.code == 403, f"Expected 403 for the audit log without its scope, got {error.code}"
         events = command("history", http_id)
         assert [event["author"] for event in events] == ["smoke", "smoke"], "CLI did not see status authors"
         assert command("history", identifier)[-1]["author"] is None, "CLI status change gained an author"
@@ -147,8 +159,9 @@ def main() -> int:
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens with scopes, status attribution, notification outbox, its API, "
-              "and SMTP delivery, persistent per-token retries, container recreation, and non-root execution passed.")
+        print("Docker CLI/API sharing, API tokens with scopes, status attribution, the audit log, notification "
+              "outbox, its API, and SMTP delivery, persistent per-token retries, container recreation, and non-root "
+              "execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)
