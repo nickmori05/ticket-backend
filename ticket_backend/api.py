@@ -87,6 +87,9 @@ class CommentOutput(BaseModel):
     body: str
     author: str | None
     created_at: str
+    edited_at: Annotated[str | None, Field(description="When the text was last changed, or null if it never was.")]
+    edited_by: Annotated[str | None, Field(description="The token that last changed the text, or null for the "
+                                                       "terminal.")]
 
 
 class StatsOutput(BaseModel):

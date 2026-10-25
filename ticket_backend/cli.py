@@ -14,8 +14,8 @@ from ticket_backend.notifications import (
     list_notifications, retry_notifications,
 )
 from ticket_backend.tickets import (
-    STATUSES, IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
-    list_tickets, set_status, statistics, ticket_history,
+    STATUSES, CommentNotFoundError, IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket,
+    delete_comment, edit_comment, get_ticket, list_comments, list_tickets, set_status, statistics, ticket_history,
 )
 from ticket_backend.tokens import (
     MAX_GRACE_MINUTES, SCOPES, TokenNotFoundError, create_token, list_tokens, revoke_token, rotate_token,
@@ -53,6 +53,13 @@ def parser() -> argparse.ArgumentParser:
     comment.add_argument("body", help="Comment text (up to 5000 characters)")
     comments = commands.add_parser("comments", help="Show a ticket's comments")
     comments.add_argument("id", type=int)
+    edit = commands.add_parser("edit-comment", help="Replace a comment's text; the old text is not kept")
+    edit.add_argument("id", type=int)
+    edit.add_argument("comment_id", type=int)
+    edit.add_argument("body", help="New comment text (up to 5000 characters)")
+    delete = commands.add_parser("delete-comment", help="Delete a comment's text and hide it from listings")
+    delete.add_argument("id", type=int)
+    delete.add_argument("comment_id", type=int)
     commands.add_parser("stats", help="Count tickets by status")
     outbox = commands.add_parser("outbox", help="Show queued notification emails, oldest first")
     outbox.add_argument("--status", choices=NOTIFICATION_STATUSES)
@@ -120,11 +127,16 @@ def display(command: str, result, action: str | None = None) -> None:
                 print(f"  {row['note']}")
     elif command == "comment":
         print(f"Comment #{result['id']} added to ticket #{result['ticket_id']}")
+    elif command == "edit-comment":
+        print(f"Comment #{result['id']} on ticket #{result['ticket_id']} saved.")
+    elif command == "delete-comment":
+        print(f"Comment #{result['id']} deleted from ticket #{result['ticket_id']}.")
     elif command == "comments":
         if not result:
             print("No comments on this ticket.")
         for row in result:
-            print(f"{row['created_at']} UTC, {row['author'] or 'local'}:")
+            edited = f" (edited {row['edited_at']} UTC by {row['edited_by'] or 'local'})" if row["edited_at"] else ""
+            print(f"#{row['id']} {row['created_at']} UTC, {row['author'] or 'local'}{edited}:")
             print(f"  {row['body']}")
     elif command == "outbox":
         if not result:
@@ -207,7 +219,7 @@ def send_notifications(args: argparse.Namespace) -> dict:
 def main(argv: list[str] | None = None) -> int:
     """Run one command and return its exit code.
 
-    0 means success, 1 a missing ticket, token, or notification, 2 invalid input or a storage error, 3 a reused
+    0 means success, 1 a missing ticket, comment, token, or notification, 2 invalid input or a storage error, 3 a reused
     submission key with different content, 4 an unavailable SMTP server, and 130 cancellation.
     """
     args = parser().parse_args(argv)
@@ -232,6 +244,10 @@ def main(argv: list[str] | None = None) -> int:
             result = add_comment(args.id, args.body, args.database)
         elif args.command == "comments":
             result = list_comments(args.id, args.database)
+        elif args.command == "edit-comment":
+            result = edit_comment(args.id, args.comment_id, args.body, args.database)
+        elif args.command == "delete-comment":
+            result = delete_comment(args.id, args.comment_id, args.database)
         elif args.command == "stats":
             result = statistics(args.database)
         elif args.command == "outbox":
@@ -255,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
                                   grace_minutes=args.grace_period)
         else:
             result = revoke_token(args.name, args.database)
-    except (TicketNotFoundError, TokenNotFoundError, NotificationNotFoundError) as error:
+    except (TicketNotFoundError, CommentNotFoundError, TokenNotFoundError, NotificationNotFoundError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     except IdempotencyConflictError as error:

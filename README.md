@@ -4,8 +4,8 @@
 
 A support-ticket tracker built on Python and SQLite, with a command line and an
 HTTP API that share one database. Tickets move between `open`, `in_progress`, and
-`closed` with a recorded history, collect comments, and can notify the person who
-filed them by email.
+`closed` with a recorded history, collect comments that can be edited or deleted, and
+can notify the person who filed them by email.
 
 - **CLI** using only the standard library: create, search, and update tickets, with
   text or JSON output and stable exit codes.
@@ -67,6 +67,8 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `status ID STATUS [--note TEXT]` | Change status to `open`, `in_progress`, or `closed` |
 | `history ID` | Show recorded status changes |
 | `comment ID BODY` / `comments ID` | Add a comment / list comments, oldest first |
+| `edit-comment ID COMMENT_ID BODY` | Replace a comment's text |
+| `delete-comment ID COMMENT_ID` | Delete a comment's text and hide it from listings |
 | `stats` | Count tickets by status |
 | `outbox [--status S] [--ticket ID] [--limit N] [--offset N]` | List queued notifications, oldest first |
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
@@ -231,6 +233,27 @@ Counts are kept in the API process's memory, so they start again when it restart
 and each process counts separately: run one API process (as Docker Compose does), or
 expect each of `uvicorn --workers N` to allow the full limit. The first refused
 request after an accepted one is logged as a warning naming the token.
+
+## Comments
+
+Comments are listed oldest first with their IDs, and can be corrected or removed:
+
+```sh
+python3 tickets.py comments 1
+python3 tickets.py edit-comment 1 3 "Asked for the full logs"
+python3 tickets.py delete-comment 1 4
+```
+
+An edit replaces the text and records when and by whom, which listings show next to
+the comment; saving the same text again records nothing. A deletion empties the
+comment and hides it from listings, keeping only who deleted it and when, so its ID
+is never reused. Neither keeps the replaced text, because the usual reason to remove
+a comment is that it should not have been written, such as a pasted password: the old
+text is overwritten in the database file rather than left in its free space. A
+deleted comment cannot be edited or deleted again, and a comment ID only matches on
+its own ticket. Edits and deletions leave the ticket's status, history, and
+notifications alone. The terminal can change any comment, since anyone who can run it
+can already open the database.
 
 ## Audit log
 
@@ -428,6 +451,11 @@ crash mid-send or a second sender waits for the retry delay instead of sending a
 at once. Delivery is at least once: a process that stops after sending but before
 recording success sends that message again, with the same `Message-ID`.
 
+**Comment edits.** Edits and deletions take the write lock, check the comment
+belongs to the ticket and has not been deleted, and update it in one transaction.
+Their connections turn on SQLite's `secure_delete`, which zeroes the space the old
+text occupied instead of leaving it readable in free pages.
+
 **Schema upgrades.** Each connection applies `schema.sql`, which creates any missing
 tables and indexes, then adds columns introduced since a database was created.
 Existing rows and column definitions are never rewritten, so databases from earlier
@@ -447,6 +475,7 @@ python scripts/smoke_docker.py   # needs Docker
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, idempotent
 retries and their per-token keys, token authentication, scopes, expiry, rotation, and rate limits,
+comment edits and deletions,
 the audit log, the CLI
 and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
 on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
@@ -486,7 +515,10 @@ test.
   crash or storage failure between the two leaves a completed request unrecorded.
   Requests without a valid token are not recorded, the client address is the proxy's
   when one is in front of the API, and old rows are deleted only by `audit prune`.
-- Comments cannot be edited or deleted, and a ticket's email cannot be changed.
+- A ticket's email cannot be changed. Comment edits keep no earlier versions, so a
+  reader cannot see what a comment said before it was edited or deleted. Replaced
+  text is overwritten in the database file, but may survive in backups, in a copy
+  made before the change, or in the filesystem's own free space.
 - Requester emails are stored in plain text in the database, and hidden only from API
   tokens without `emails:read`. An address an SMTP server quotes in a different form
   than the recipient, such as an encoded one, is not hidden from `last_error`.

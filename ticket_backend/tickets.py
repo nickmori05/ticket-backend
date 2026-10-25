@@ -1,4 +1,8 @@
-"""Tickets, their status history, and comments."""
+"""Tickets, their status history, and comments.
+
+Comments can be edited and deleted. A change made with an author (an API token) is allowed only on that author's own
+comments; one made without (the terminal) is allowed on any. Neither keeps the replaced text.
+"""
 
 from contextlib import closing
 from pathlib import Path
@@ -10,6 +14,7 @@ from ticket_backend.validation import optional_author, optional_email, require_i
 
 
 STATUSES = ("open", "in_progress", "closed")
+_COMMENT_COLUMNS = "id, ticket_id, body, author, created_at, edited_at, edited_by"
 
 
 class TicketNotFoundError(LookupError):
@@ -18,6 +23,14 @@ class TicketNotFoundError(LookupError):
 
 class IdempotencyConflictError(ValueError):
     pass
+
+
+class CommentNotFoundError(LookupError):
+    pass
+
+
+class CommentPermissionError(Exception):
+    """Raised when an author tries to change a comment written by someone else."""
 
 
 def create_ticket(
@@ -196,18 +209,100 @@ def add_comment(
                 (ticket_id, body, author),
             )
             return dict(connection.execute(
-                "SELECT * FROM ticket_comments WHERE id = ?", (cursor.lastrowid,)
+                f"SELECT {_COMMENT_COLUMNS} FROM ticket_comments WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone())
+
+
+def _changeable_comment(connection, ticket_id: int, comment_id: int, author: str | None):
+    if connection.execute("SELECT id FROM tickets WHERE id = ?", (ticket_id,)).fetchone() is None:
+        raise TicketNotFoundError(f"Ticket #{ticket_id} was not found.")
+    row = connection.execute(
+        f"SELECT {_COMMENT_COLUMNS} FROM ticket_comments WHERE id = ? AND ticket_id = ? AND deleted_at IS NULL",
+        (comment_id, ticket_id),
+    ).fetchone()
+    if row is None:
+        raise CommentNotFoundError(f"Comment #{comment_id} was not found on ticket #{ticket_id}.")
+    if author is not None and row["author"] != author:
+        raise CommentPermissionError(f"Comment #{comment_id} was written by someone else; {author} can only change "
+                                     "its own comments.")
+    return row
+
+
+def edit_comment(
+    ticket_id: int,
+    comment_id: int,
+    body: str,
+    database: Path = DEFAULT_DATABASE,
+    *,
+    author: str | None = None,
+) -> dict:
+    """Replace a comment's text, recording when and by whom. The previous text is not kept.
+
+    With an author, only that author's comments can be edited; raises CommentPermissionError otherwise. Raises
+    CommentNotFoundError for a comment that is missing, deleted, or on another ticket. Saving the same text again
+    returns the comment unchanged.
+    """
+    ticket_id = require_id(ticket_id)
+    comment_id = require_id(comment_id, "Comment ID")
+    body = require_text(body, "Comment", 5_000)
+    author = optional_author(author)
+    with closing(connect(database)) as connection:
+        # Overwrite the replaced text in the file instead of leaving it in free pages.
+        connection.execute("PRAGMA secure_delete = ON")
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = _changeable_comment(connection, ticket_id, comment_id, author)
+            if row["body"] == body:
+                return dict(row)
+            connection.execute(
+                "UPDATE ticket_comments SET body = ?, edited_at = CURRENT_TIMESTAMP, edited_by = ? WHERE id = ?",
+                (body, author, comment_id),
+            )
+            return dict(connection.execute(
+                f"SELECT {_COMMENT_COLUMNS} FROM ticket_comments WHERE id = ?", (comment_id,)
+            ).fetchone())
+
+
+def delete_comment(
+    ticket_id: int,
+    comment_id: int,
+    database: Path = DEFAULT_DATABASE,
+    *,
+    author: str | None = None,
+) -> dict:
+    """Delete a comment's text and hide it from listings, recording when and by whom.
+
+    The row stays, emptied, so comment IDs are never reused and the deletion can be accounted for. Permissions and
+    errors are as for edit_comment; deleting a comment again raises CommentNotFoundError.
+    """
+    ticket_id = require_id(ticket_id)
+    comment_id = require_id(comment_id, "Comment ID")
+    author = optional_author(author)
+    with closing(connect(database)) as connection:
+        connection.execute("PRAGMA secure_delete = ON")
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _changeable_comment(connection, ticket_id, comment_id, author)
+            connection.execute(
+                """UPDATE ticket_comments SET body = '', deleted_at = CURRENT_TIMESTAMP, deleted_by = ?
+                   WHERE id = ?""",
+                (author, comment_id),
+            )
+            return dict(connection.execute(
+                "SELECT id, ticket_id, deleted_at, deleted_by FROM ticket_comments WHERE id = ?", (comment_id,)
             ).fetchone())
 
 
 def list_comments(ticket_id: int, database: Path = DEFAULT_DATABASE) -> list[dict]:
-    """Return a ticket's comments, oldest first."""
+    """Return a ticket's comments that have not been deleted, oldest first."""
     ticket_id = require_id(ticket_id)
     with closing(connect(database)) as connection:
         if connection.execute("SELECT id FROM tickets WHERE id = ?", (ticket_id,)).fetchone() is None:
             raise TicketNotFoundError(f"Ticket #{ticket_id} was not found.")
         return [
             dict(row) for row in connection.execute(
-                "SELECT * FROM ticket_comments WHERE ticket_id = ? ORDER BY id", (ticket_id,)
+                f"SELECT {_COMMENT_COLUMNS} FROM ticket_comments WHERE ticket_id = ? AND deleted_at IS NULL "
+                "ORDER BY id",
+                (ticket_id,),
             )
         ]
