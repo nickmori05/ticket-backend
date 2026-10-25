@@ -11,7 +11,7 @@ filed them by email.
   text or JSON output and stable exit codes.
 - **HTTP API** built with FastAPI, protected by bearer tokens that are stored hashed,
   limited to scopes and a number of requests per minute, optionally expiring, and
-  managed from the terminal.
+  managed and rotated from the terminal.
 - **Safe retries**: an optional idempotency key, private to the token that sent it,
   makes a repeated submission return the original ticket instead of creating a duplicate.
 - **Audit log** of every request made with a token: which token, what route, which
@@ -73,6 +73,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `retry-notifications [ID ...]` | Requeue failed notifications |
 | `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
+| `token rotate NAME [--expires-in DAYS]` | Replace a token's secret, keeping its name, scopes, and history |
 | `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
 | `audit prune --older-than DAYS` | Delete recorded API requests older than 1 to 3650 days |
 
@@ -164,11 +165,32 @@ python3 tickets.py token create dashboard --scope tickets:read --expires-in 90
 python3 tickets.py token list
 ```
 
-Scopes and expiry are fixed when a token is created; to change them, create a new
-token and revoke the old one. A token without `emails:read` can still submit a ticket
+Scopes are fixed when a token is created; to change them, create a new token and
+revoke the old one. An expiry can be renewed by [rotating](#rotating-tokens) the
+token. A token without `emails:read` can still submit a ticket
 with an email, and notifications are still sent; the address is only left out of
 what that token is shown, including the response to its own submission. `emails:read`
 grants nothing by itself.
+
+### Rotating tokens
+
+`token rotate NAME` replaces a token's secret and prints the new one, once. The old
+secret stops working on the next request. Everything else stays with the name: its
+scopes, rate limit, and expiry, the idempotency keys it has sent, its entries in the
+audit log, and the history, comments, and tickets it is recorded as the author of. Use
+it on a schedule, or when a secret may have leaked, instead of creating a token under
+a new name.
+
+```sh
+python3 tickets.py token rotate web-form
+python3 tickets.py token rotate contractor --expires-in 90
+```
+
+`--expires-in DAYS` sets a new expiry counted from now; without it the expiry is
+unchanged, so rotating never extends a token's life by accident. An expired token can
+only be rotated with `--expires-in`, which makes it active again. A revoked token
+cannot be rotated. `token list` shows when each token was last rotated. Rotation does
+not reset the token's rate limit, because the budget belongs to the name.
 
 A token keeps exactly the scopes it was created with, so it never gains a scope added
 in a later version. Tokens created before scopes existed keep `tickets:read`,
@@ -363,8 +385,9 @@ from the terminal or predates attribution, stay shared by every caller as before
 no retry in flight during an upgrade creates a duplicate.
 
 **Authentication.** Tokens are 256-bit random values. Only their SHA-256 hashes are
-stored, so a lost token cannot be recovered, only revoked and replaced under a new
-name. Each token stores its scopes and an optional expiry time next to its hash, and
+stored, so a lost token cannot be recovered, only rotated to a new secret or revoked.
+Rotation replaces the hash in place inside one write transaction, after checking the
+token is not revoked, so a concurrent revocation is never undone. Each token stores its scopes and an optional expiry time next to its hash, and
 both are checked on every request, so revocation and expiry apply to the next request.
 Each route depends on one scope, which is checked after the token and before the
 request body or the ticket, so a client without access learns nothing about either.
@@ -412,7 +435,7 @@ python scripts/smoke_docker.py   # needs Docker
 
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, idempotent
-retries and their per-token keys, token authentication, scopes, expiry, and rate limits,
+retries and their per-token keys, token authentication, scopes, expiry, rotation, and rate limits,
 the audit log, the CLI
 and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
 on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
@@ -440,8 +463,9 @@ test.
   that limits by address in front of the API if it is exposed.
 - Authors are token names, not people, and terminal changes have no author (shown as
   `local`). Entries from before attribution existed have none either.
-- Idempotency keys never expire, and belong to a token's name, so a replacement
-  token cannot replay keys sent by the one it replaces. Keys saved by earlier versions
+- Idempotency keys never expire, and belong to a token's name, so a token created
+  under a new name cannot replay keys sent by the one it replaces; rotate the token
+  instead to keep them. Keys saved by earlier versions
   for tickets with no recorded creator remain shared by every caller.
 - The audit log is written after each request, not in the same transaction, so a
   crash or storage failure between the two leaves a completed request unrecorded.

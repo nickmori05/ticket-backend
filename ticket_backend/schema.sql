@@ -57,7 +57,9 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     rate_limit INTEGER,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP,
-    revoked_at TIMESTAMP
+    revoked_at TIMESTAMP,
+    -- When the secret was last replaced by `token rotate`; NULL if it never was.
+    rotated_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS ticket_notifications (

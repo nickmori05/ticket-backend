@@ -1,6 +1,7 @@
 """API tokens. Only SHA-256 hashes are stored; the token itself is shown once, when it is created.
 
 Each token carries a fixed set of scopes, an optional expiry, and an optional rate limit, all chosen at creation.
+Rotating a token replaces its secret but keeps its name, so everything recorded under the name stays with it.
 """
 
 from collections.abc import Iterable
@@ -21,7 +22,7 @@ SCOPES = (
 # Tokens created before scopes existed have no stored scopes and keep the full access they always had.
 LEGACY_SCOPES = ("tickets:read", "tickets:write", "emails:read")
 MAX_EXPIRY_DAYS = 3650
-_COLUMNS = """id, name, scopes, rate_limit, created_at, expires_at, revoked_at,
+_COLUMNS = """id, name, scopes, rate_limit, created_at, expires_at, revoked_at, rotated_at,
     CASE WHEN revoked_at IS NOT NULL THEN 'revoked'
          WHEN expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP THEN 'expired'
          ELSE 'active' END AS state"""
@@ -59,6 +60,17 @@ def _token_row(row: sqlite3.Row) -> dict:
     return {**dict(row), "scopes": _stored_scopes(row["scopes"])}
 
 
+def _require_expiry(expires_in_days: int | None) -> None:
+    if expires_in_days is not None and (
+        type(expires_in_days) is not int or not 1 <= expires_in_days <= MAX_EXPIRY_DAYS
+    ):
+        raise ValueError(f"Expiry must be a whole number of days from 1 to {MAX_EXPIRY_DAYS}.")
+
+
+def _new_token() -> str:
+    return "tkt_" + secrets.token_urlsafe(32)
+
+
 def create_token(
     name: str,
     database: Path = DEFAULT_DATABASE,
@@ -74,13 +86,10 @@ def create_token(
     """
     name = require_token_name(name)
     scopes = _token_scopes(scopes)
-    if expires_in_days is not None and (
-        type(expires_in_days) is not int or not 1 <= expires_in_days <= MAX_EXPIRY_DAYS
-    ):
-        raise ValueError(f"Expiry must be a whole number of days from 1 to {MAX_EXPIRY_DAYS}.")
+    _require_expiry(expires_in_days)
     if rate_limit is not None:
         require_rate_limit(rate_limit)
-    token = "tkt_" + secrets.token_urlsafe(32)
+    token = _new_token()
     with closing(connect(database)) as connection:
         with connection:
             try:
@@ -115,6 +124,42 @@ def revoke_token(name: str, database: Path = DEFAULT_DATABASE) -> dict:
     if row is None:
         raise TokenNotFoundError(f"Token {name} was not found.")
     return _token_row(row)
+
+
+def rotate_token(
+    name: str,
+    database: Path = DEFAULT_DATABASE,
+    *,
+    expires_in_days: int | None = None,
+) -> dict:
+    """Give a token a new secret and return it with its plain value, which is not stored and cannot be shown again.
+
+    The old secret stops working at once. The name, scopes, and rate limit stay, so the token keeps its idempotency
+    keys, audit history, and authorship. The expiry stays too unless expires_in_days sets a new one from now, which
+    is the only way to rotate a token that has already expired. Revoked tokens cannot be rotated.
+    """
+    name = require_token_name(name)
+    _require_expiry(expires_in_days)
+    token = _new_token()
+    with closing(connect(database)) as connection:
+        with connection:
+            # Take the write lock before reading the state, so a concurrent revocation cannot be undone by this.
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(f"SELECT {_COLUMNS} FROM api_tokens WHERE name = ?", (name,)).fetchone()
+            if row is None:
+                raise TokenNotFoundError(f"Token {name} was not found.")
+            if row["state"] == "revoked":
+                raise ValueError(f"Token {name} is revoked and cannot be rotated; create a new token instead.")
+            if row["state"] == "expired" and expires_in_days is None:
+                raise ValueError(f"Token {name} has expired; rotate it with a new expiry to use it again.")
+            connection.execute(
+                """UPDATE api_tokens SET token_hash = ?, rotated_at = CURRENT_TIMESTAMP,
+                       expires_at = CASE WHEN ? IS NULL THEN expires_at ELSE datetime('now', ?) END
+                   WHERE id = ?""",
+                (_token_hash(token), expires_in_days, f"+{expires_in_days} days", row["id"]),
+            )
+            row = connection.execute(f"SELECT {_COLUMNS} FROM api_tokens WHERE id = ?", (row["id"],)).fetchone()
+    return {**_token_row(row), "token": token}
 
 
 def token_access(token: str | None, database: Path = DEFAULT_DATABASE) -> dict | None:
