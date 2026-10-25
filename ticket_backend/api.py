@@ -1,8 +1,9 @@
 """The HTTP API. Run it with `uvicorn ticket_backend.api:app`; every route except /health needs a bearer token.
 
 Each route also needs one scope on that token, and requester emails, including notification recipients, are shown
-only to tokens with emails:read. Each token is limited to a number of requests per minute, and every request made
-with a valid token within that limit is recorded in the audit log.
+only to tokens with emails:read. A token can edit or delete only the comments it wrote. Each token is limited to a
+number of requests per minute, and every request made with a valid token within that limit is recorded in the audit
+log.
 """
 
 import logging
@@ -28,8 +29,9 @@ from ticket_backend.notifications import (
 )
 from ticket_backend.ratelimit import RateLimiter, rate_limit_from_environment, require_rate_limit
 from ticket_backend.tickets import (
-    IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
-    list_tickets, set_status, statistics, ticket_history,
+    CommentNotFoundError, CommentPermissionError, IdempotencyConflictError, TicketNotFoundError, add_comment,
+    create_ticket, delete_comment, edit_comment, get_ticket, list_comments, list_tickets, set_status, statistics,
+    ticket_history,
 )
 from ticket_backend.tokens import token_access
 
@@ -38,6 +40,7 @@ Status = Literal["open", "in_progress", "closed"]
 NotificationStatus = Literal["pending", "sent", "failed"]
 TicketId = Annotated[int, PathParameter(gt=0)]
 NotificationId = Annotated[int, PathParameter(gt=0)]
+CommentId = Annotated[int, PathParameter(gt=0)]
 bearer = HTTPBearer(auto_error=False, description="A token from `tickets.py token create NAME`.")
 logger = logging.getLogger(__name__)
 
@@ -147,6 +150,14 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
     @app.exception_handler(TicketNotFoundError)
     async def missing_ticket(_request: Request, error: TicketNotFoundError):
         return JSONResponse(status_code=404, content={"detail": str(error)})
+
+    @app.exception_handler(CommentNotFoundError)
+    async def missing_comment(_request: Request, error: CommentNotFoundError):
+        return JSONResponse(status_code=404, content={"detail": str(error)})
+
+    @app.exception_handler(CommentPermissionError)
+    async def someone_elses_comment(_request: Request, error: CommentPermissionError):
+        return JSONResponse(status_code=403, content={"detail": str(error)})
 
     @app.exception_handler(NotificationNotFoundError)
     async def missing_notification(_request: Request, error: NotificationNotFoundError):
@@ -276,6 +287,19 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
     @protected.get("/tickets/{ticket_id}/comments", response_model=list[CommentOutput], dependencies=[Depends(reader)])
     def comments(ticket_id: TicketId):
         return list_comments(ticket_id, database)
+
+    changeable = {403: {"description": "The token lacks the scope, or the comment was written by someone else"},
+                  404: {"description": "No such ticket, or no comment with this ID on it"}}
+
+    @protected.patch("/tickets/{ticket_id}/comments/{comment_id}", response_model=CommentOutput, responses=changeable)
+    def change_comment(ticket_id: TicketId, comment_id: CommentId, payload: CommentInput,
+                       access: Annotated[dict, Depends(writer)]):
+        return edit_comment(ticket_id, comment_id, payload.body, database, author=access["name"])
+
+    @protected.delete("/tickets/{ticket_id}/comments/{comment_id}", status_code=204, responses=changeable)
+    def remove_comment(ticket_id: TicketId, comment_id: CommentId, access: Annotated[dict, Depends(writer)]):
+        delete_comment(ticket_id, comment_id, database, author=access["name"])
+        return Response(status_code=204)
 
     @protected.get("/stats", response_model=StatsOutput, dependencies=[Depends(reader)])
     def stats():

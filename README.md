@@ -119,6 +119,8 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /tickets/{id}/history` | `tickets:read` | Recorded status changes, each with its `author` |
 | `POST /tickets/{id}/comments` | `tickets:write` | Add a comment from JSON `body`; returns 201 |
 | `GET /tickets/{id}/comments` | `tickets:read` | Comments, oldest first |
+| `PATCH /tickets/{id}/comments/{comment_id}` | `tickets:write` | Replace the text of the token's own comment from JSON `body` |
+| `DELETE /tickets/{id}/comments/{comment_id}` | `tickets:write` | Delete the token's own comment; returns 204 |
 | `GET /stats` | `tickets:read` | Ticket counts by status |
 | `GET /notifications` | `notifications:read` | Outbox, oldest first, with optional `status`, `ticket_id`, `limit`, and `offset` |
 | `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
@@ -140,18 +142,19 @@ curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
 A missing, unknown, revoked, or expired token returns 401 before any ticket is read,
 and a token without the route's scope returns 403 with
 `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. A token over its
-[rate limit](#rate-limits) returns 429 with `Retry-After`. A missing ticket
-or notification returns 404, a reused idempotency key with different content or a
+[rate limit](#rate-limits) returns 429 with `Retry-After`, and changing another
+author's [comment](#comments) 403. A missing ticket, comment, or notification
+returns 404, a reused idempotency key with different content or a
 retry of a notification that is not `failed` 409, invalid fields 422, and a storage
-failure 503 without exposing file paths. Unknown JSON fields are rejected. Ticket creation, status changes, and comments record the
-name of the token that made them.
+failure 503 without exposing file paths. Unknown JSON fields are rejected. Ticket creation, status changes, and comments and their
+edits record the name of the token that made them.
 
 ### Token scopes and expiry
 
 | Scope | Grants |
 | --- | --- |
 | `tickets:read` | Reading tickets, history, comments, and statistics |
-| `tickets:write` | Creating tickets, changing status, and adding comments |
+| `tickets:write` | Creating tickets, changing status, and adding, editing, and deleting its own comments |
 | `emails:read` | Seeing requester emails; without it, `email` and `recipient` are always `null` in responses |
 | `notifications:read` | Reading the outbox, including subjects and bodies, which repeat ticket titles, messages, and notes |
 | `notifications:write` | Requeueing failed notifications |
@@ -254,6 +257,23 @@ deleted comment cannot be edited or deleted again, and a comment ID only matches
 its own ticket. Edits and deletions leave the ticket's status, history, and
 notifications alone. The terminal can change any comment, since anyone who can run it
 can already open the database.
+
+Over HTTP, a token with `tickets:write` can edit or delete only the comments it wrote,
+identified by its name, so a [rotated](#rotating-tokens) token keeps its comments.
+Another author's comment, including one added from the terminal, returns 403 and is
+left unchanged; a missing or deleted comment, or one on another ticket, returns 404.
+
+```sh
+curl -X PATCH http://127.0.0.1:8000/tickets/1/comments/3 \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"body":"Asked for the full logs"}'
+curl -X DELETE http://127.0.0.1:8000/tickets/1/comments/4 -H "Authorization: Bearer $TICKETS_TOKEN"
+```
+
+Responses include `edited_at` and `edited_by`, `null` until a comment is edited and
+`null` in `edited_by` for an edit from the terminal. Both changes appear in the
+[audit log](#audit-log) under the comment's ticket, including refused attempts.
 
 ## Audit log
 
@@ -515,6 +535,9 @@ test.
   crash or storage failure between the two leaves a completed request unrecorded.
   Requests without a valid token are not recorded, the client address is the proxy's
   when one is in front of the API, and old rows are deleted only by `audit prune`.
+- Over HTTP, only a comment's author can change it; there is no moderator scope, so
+  removing someone else's comment needs the terminal. Comments written from the
+  terminal can only be changed there.
 - A ticket's email cannot be changed. Comment edits keep no earlier versions, so a
   reader cannot see what a comment said before it was edited or deleted. Replaced
   text is overwritten in the database file, but may survive in backups, in a copy
