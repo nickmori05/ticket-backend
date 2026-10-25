@@ -73,7 +73,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `retry-notifications [ID ...]` | Requeue failed notifications |
 | `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
-| `token rotate NAME [--expires-in DAYS]` | Replace a token's secret, keeping its name, scopes, and history |
+| `token rotate NAME [--grace-period MINUTES] [--expires-in DAYS]` | Replace a token's secret, keeping its name, scopes, and history |
 | `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
 | `audit prune --older-than DAYS` | Delete recorded API requests older than 1 to 3650 days |
 
@@ -175,16 +175,24 @@ grants nothing by itself.
 ### Rotating tokens
 
 `token rotate NAME` replaces a token's secret and prints the new one, once. The old
-secret stops working on the next request. Everything else stays with the name: its
+secret stops working on the next request, or after `--grace-period MINUTES` (up to
+10080, one week) so that clients can be switched over without a failed request. Everything else stays with the name: its
 scopes, rate limit, and expiry, the idempotency keys it has sent, its entries in the
 audit log, and the history, comments, and tickets it is recorded as the author of. Use
 it on a schedule, or when a secret may have leaked, instead of creating a token under
 a new name.
 
 ```sh
-python3 tickets.py token rotate web-form
+python3 tickets.py token rotate web-form --grace-period 60
 python3 tickets.py token rotate contractor --expires-in 90
 ```
+
+During a grace period both secrets authenticate as the same token, with the same
+scopes, one shared rate limit, and one name in the audit log. Only the secret replaced
+by the latest rotation is kept, so rotating again retires any older one at once;
+rotating with no grace period is how to end one early. Revoking or expiring the token
+refuses both secrets, and renewing an expired token never brings back its old secret.
+`token list` shows until when a previous secret is still accepted.
 
 `--expires-in DAYS` sets a new expiry counted from now; without it the expiry is
 unchanged, so rotating never extends a token's life by accident. An expired token can
@@ -387,7 +395,10 @@ no retry in flight during an upgrade creates a duplicate.
 **Authentication.** Tokens are 256-bit random values. Only their SHA-256 hashes are
 stored, so a lost token cannot be recovered, only rotated to a new secret or revoked.
 Rotation replaces the hash in place inside one write transaction, after checking the
-token is not revoked, so a concurrent revocation is never undone. Each token stores its scopes and an optional expiry time next to its hash, and
+token is not revoked, so a concurrent revocation is never undone. With a grace period
+the replaced hash moves to `previous_token_hash` with its own deadline, and the token
+check looks up either hash through an index on each, so a lookup stays one indexed
+query. Each token stores its scopes and an optional expiry time next to its hash, and
 both are checked on every request, so revocation and expiry apply to the next request.
 Each route depends on one scope, which is checked after the token and before the
 request body or the ticket, so a client without access learns nothing about either.
@@ -458,6 +469,9 @@ test.
 - Scopes are coarse (read, write, and emails across all tickets), and neither scopes
   nor rate limits can be changed after a token is created. Tokens travel in plain text
   over HTTP, so keep the API on loopback or behind HTTPS.
+- Requests made with a previous secret during a rotation's grace period are not told
+  apart from requests with the new one, so the audit log cannot show which clients
+  still need updating.
 - Rate limits are per process and reset on restart, so they do not hold across several
   API processes or hosts. Requests without a valid token are not limited; put a proxy
   that limits by address in front of the API if it is exposed.

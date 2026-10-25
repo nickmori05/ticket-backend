@@ -31,6 +31,12 @@ def stored_hash(database, name):
         return connection.execute("SELECT token_hash FROM api_tokens WHERE name = ?", (name,)).fetchone()[0]
 
 
+def end_grace(database, name):
+    with closing(connect(database)) as connection, connection:
+        connection.execute("UPDATE api_tokens SET previous_expires_at = datetime('now', '-1 second') WHERE name = ?",
+                           (name,))
+
+
 def utc(timestamp):
     return datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
@@ -132,6 +138,91 @@ class TokenRotationTests(unittest.TestCase):
                          {"name": "old", "scopes": list(LEGACY_SCOPES), "rate_limit": None})
 
 
+class RotationGracePeriodTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.database = Path(directory.name) / "tickets.db"
+
+    def test_both_secrets_work_until_the_grace_period_ends(self):
+        old = create_token("form", self.database, scopes=["tickets:write"])["token"]
+        rotated = rotate_token("form", self.database, grace_minutes=60)
+        self.assertLess(abs(utc(rotated["previous_valid_until"]) - datetime.now(timezone.utc) - timedelta(hours=1)),
+                        timedelta(minutes=1))
+        for secret in (old, rotated["token"]):
+            self.assertEqual(token_access(secret, self.database),
+                             {"name": "form", "scopes": ["tickets:write"], "rate_limit": None})
+        end_grace(self.database, "form")
+        self.assertIsNone(authenticate(old, self.database))
+        self.assertEqual(authenticate(rotated["token"], self.database), "form")
+        self.assertIsNone(list_tokens(self.database)[0]["previous_valid_until"])
+
+    def test_without_a_grace_period_nothing_is_kept(self):
+        create_token("alice", self.database)
+        self.assertIsNone(rotate_token("alice", self.database)["previous_valid_until"])
+        with closing(connect(self.database)) as connection:
+            kept = connection.execute("SELECT previous_token_hash, previous_expires_at FROM api_tokens").fetchone()
+        self.assertEqual(tuple(kept), (None, None))
+
+    def test_rotating_again_retires_the_older_secret_at_once(self):
+        first = create_token("alice", self.database)["token"]
+        second = rotate_token("alice", self.database, grace_minutes=60)["token"]
+        third = rotate_token("alice", self.database, grace_minutes=60)["token"]
+        self.assertEqual([authenticate(secret, self.database) for secret in (first, second, third)],
+                         [None, "alice", "alice"])
+        fourth = rotate_token("alice", self.database)["token"]
+        self.assertEqual([authenticate(secret, self.database) for secret in (second, third, fourth)],
+                         [None, None, "alice"])
+
+    def test_revoking_or_expiring_the_token_refuses_both_secrets(self):
+        old = create_token("alice", self.database, expires_in_days=1)["token"]
+        new = rotate_token("alice", self.database, grace_minutes=60)["token"]
+        expire(self.database, "alice")
+        self.assertEqual([authenticate(old, self.database), authenticate(new, self.database)], [None, None])
+        self.assertEqual(list_tokens(self.database)[0]["state"], "expired")
+        old = create_token("bob", self.database)["token"]
+        new = rotate_token("bob", self.database, grace_minutes=60)["token"]
+        revoke_token("bob", self.database)
+        self.assertEqual([authenticate(old, self.database), authenticate(new, self.database)], [None, None])
+
+    def test_renewing_an_expired_token_does_not_bring_back_its_old_secret(self):
+        old = create_token("contractor", self.database, expires_in_days=1)["token"]
+        expire(self.database, "contractor")
+        renewed = rotate_token("contractor", self.database, expires_in_days=30, grace_minutes=60)
+        self.assertIsNone(renewed["previous_valid_until"])
+        self.assertIsNone(authenticate(old, self.database))
+        self.assertEqual(authenticate(renewed["token"], self.database), "contractor")
+
+    def test_invalid_grace_periods_change_nothing(self):
+        old = create_token("alice", self.database)["token"]
+        for minutes in (-1, 10_081, "60", 1.5, None, True):
+            with self.subTest(minutes=minutes), self.assertRaisesRegex(ValueError, "Grace period must"):
+                rotate_token("alice", self.database, grace_minutes=minutes)
+        self.assertEqual(authenticate(old, self.database), "alice")
+        self.assertEqual(rotate_token("alice", self.database, grace_minutes=10_080)["state"], "active")
+
+    def test_older_databases_gain_the_grace_columns_and_index(self):
+        legacy = self.database.with_name("legacy.db")
+        token = "tkt_legacy-token"
+        with closing(sqlite3.connect(legacy)) as connection:
+            connection.executescript(f"""
+                CREATE TABLE api_tokens (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    revoked_at TIMESTAMP
+                );
+                INSERT INTO api_tokens (name, token_hash)
+                VALUES ('old', '{hashlib.sha256(token.encode()).hexdigest()}');
+            """)
+        new = rotate_token("old", legacy, grace_minutes=5)["token"]
+        self.assertEqual([authenticate(token, legacy), authenticate(new, legacy)], ["old", "old"])
+        with closing(sqlite3.connect(legacy)) as connection:
+            indexes = {row[1] for row in connection.execute("PRAGMA index_list(api_tokens)")}
+        self.assertIn("api_tokens_previous_token_hash", indexes)
+
+
 class TokenRotationApiTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -172,6 +263,18 @@ class TokenRotationApiTests(unittest.TestCase):
         new = rotate_token("alice", self.database)["token"]
         with self.assertLogs("ticket_backend.api", level="WARNING"):
             self.assertEqual(client.get("/stats", headers=self.bearer(new)).status_code, 429)
+
+    def test_during_the_grace_period_both_secrets_act_as_one_token(self):
+        client = self.client(rate_limit=3)
+        old = create_token("alice", self.database)["token"]
+        new = rotate_token("alice", self.database, grace_minutes=10)["token"]
+        codes = [client.get("/stats", headers=self.bearer(secret)).status_code for secret in (old, new, old)]
+        self.assertEqual(codes, [200, 200, 200])
+        with self.assertLogs("ticket_backend.api", level="WARNING"):
+            self.assertEqual(client.get("/stats", headers=self.bearer(new)).status_code, 429)
+        self.assertEqual([row["token"] for row in list_audit(self.database)], ["alice"] * 3)
+        end_grace(self.database, "alice")
+        self.assertEqual(client.get("/stats", headers=self.bearer(old)).status_code, 401)
 
     def test_rotation_never_widens_access(self):
         client = self.client()
@@ -216,6 +319,20 @@ class TokenRotationCliTests(unittest.TestCase):
         self.assertEqual((code, rotated["state"]), (0, "active"))
         self.assertEqual(authenticate(rotated["token"], self.database), "alice")
         self.assertIsNotNone(rotated["rotated_at"])
+
+    def test_rotate_with_a_grace_period(self):
+        old = create_token("alice", self.database)["token"]
+        code, output, _errors = self.run_command("token", "rotate", "alice", "--grace-period", "30")
+        self.assertEqual(code, 0)
+        self.assertRegex(output, r"\nThe previous token works until \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC\.\n")
+        self.assertEqual(authenticate(old, self.database), "alice")
+        self.assertRegex(self.run_command("token", "list")[1], r"rotated .* UTC, previous token until .* UTC\)$")
+        rotated = json.loads(self.run_command("token", "rotate", "alice", json_mode=True)[1])
+        self.assertIsNone(rotated["previous_valid_until"])
+        self.assertNotIn("previous token", self.run_command("token", "list")[1])
+        code, output, errors = self.run_command("token", "rotate", "alice", "--grace-period", "10081")
+        self.assertEqual((code, output), (2, ""))
+        self.assertIn("Grace period must", errors)
 
     def test_errors_use_existing_exit_codes(self):
         create_token("alice", self.database)

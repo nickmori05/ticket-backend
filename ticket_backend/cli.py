@@ -18,7 +18,7 @@ from ticket_backend.tickets import (
     list_tickets, set_status, statistics, ticket_history,
 )
 from ticket_backend.tokens import (
-    SCOPES, TokenNotFoundError, create_token, list_tokens, revoke_token, rotate_token,
+    MAX_GRACE_MINUTES, SCOPES, TokenNotFoundError, create_token, list_tokens, revoke_token, rotate_token,
 )
 
 
@@ -82,6 +82,9 @@ def parser() -> argparse.ArgumentParser:
     token_rotate.add_argument("name")
     token_rotate.add_argument("--expires-in", type=int, metavar="DAYS",
                               help="Set a new expiry this many days from now (default: keep the current one)")
+    token_rotate.add_argument("--grace-period", type=int, default=0, metavar="MINUTES",
+                              help=f"Keep accepting the previous token for up to {MAX_GRACE_MINUTES} minutes "
+                                   "(default: 0, refuse it at once)")
     audit = commands.add_parser("audit", help="Review or prune the log of API requests")
     audit_actions = audit.add_subparsers(dest="action", required=True)
     audit_list = audit_actions.add_parser("list", help="Show recorded API requests, newest first")
@@ -157,7 +160,9 @@ def display(command: str, result, action: str | None = None) -> None:
             print(f"Rate limit: {'none' if result['rate_limit'] == 0 else rate_limit_text(result['rate_limit'])}")
         if result["expires_at"]:
             print(f"Expires: {result['expires_at']} UTC")
-        if action == "rotate":
+        if action == "rotate" and result["previous_valid_until"]:
+            print(f"The previous token works until {result['previous_valid_until']} UTC.")
+        elif action == "rotate":
             print("The previous token no longer works.")
         print("Store it now; it cannot be shown again.")
     elif action == "list":
@@ -171,6 +176,8 @@ def display(command: str, result, action: str | None = None) -> None:
                 details.append(f"{'expired' if row['state'] == 'expired' else 'expires'} {row['expires_at']} UTC")
             if row["rotated_at"]:
                 details.append(f"rotated {row['rotated_at']} UTC")
+            if row["previous_valid_until"] and row["state"] == "active":
+                details.append(f"previous token until {row['previous_valid_until']} UTC")
             if row["rate_limit"] is not None:
                 details.append(rate_limit_text(row["rate_limit"]))
             print(f"{row['name']} [{row['state']}] {' '.join(row['scopes'])} ({', '.join(details)})")
@@ -244,7 +251,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "list":
             result = list_tokens(args.database)
         elif args.action == "rotate":
-            result = rotate_token(args.name, args.database, expires_in_days=args.expires_in)
+            result = rotate_token(args.name, args.database, expires_in_days=args.expires_in,
+                                  grace_minutes=args.grace_period)
         else:
             result = revoke_token(args.name, args.database)
     except (TicketNotFoundError, TokenNotFoundError, NotificationNotFoundError) as error:

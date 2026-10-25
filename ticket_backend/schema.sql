@@ -59,7 +59,10 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     expires_at TIMESTAMP,
     revoked_at TIMESTAMP,
     -- When the secret was last replaced by `token rotate`; NULL if it never was.
-    rotated_at TIMESTAMP
+    rotated_at TIMESTAMP,
+    -- The secret replaced by the last rotation, accepted until previous_expires_at. NULL without a grace period.
+    previous_token_hash TEXT,
+    previous_expires_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS ticket_notifications (
