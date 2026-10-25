@@ -453,7 +453,8 @@ on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a 
 builds the image and checks that the API and CLI containers share data, that a
 read-only token cannot write, see emails, or read the outbox or audit log, that the
 CLI sees requests the API recorded in the audit log, that a token over its rate limit
-gets 429 and is not audited, that the API sees
+gets 429 and is not audited, that a rotated token keeps its idempotency keys and
+accepts its previous secret only during the grace period, that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the image runs as a

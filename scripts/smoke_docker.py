@@ -164,15 +164,30 @@ def main() -> int:
         assert local["id"] not in (created["id"], submitted["id"]), "CLI shared an API token's idempotency key"
         status, replayed = request(api_address(), "/tickets", "POST", payload, key)
         assert status == 201 and replayed == submitted, "CLI key changed the token's replay"
+        # Rotation keeps the token's name, so its keys still replay; the grace period keeps the old secret working.
+        rotated = command("token", "rotate", "smoke", "--grace-period", "5")
+        assert rotated["name"] == "smoke" and rotated["previous_valid_until"], "CLI did not rotate with a grace period"
+        for secret in (token, rotated["token"]):
+            assert request(api_address(), "/stats", bearer=secret)[0] == 200, "A secret was refused during the grace"
+        status, replayed = request(api_address(), "/tickets", "POST", payload, key, bearer=rotated["token"])
+        assert status == 201 and replayed == submitted, "Rotated token lost its idempotency keys"
+        previous, token = token, command("token", "rotate", "smoke")["token"]
+        for secret in (previous, rotated["token"]):
+            try:
+                request(api_address(), "/stats", bearer=secret)
+                raise AssertionError("API accepted a secret retired by rotation")
+            except HTTPError as error:
+                assert error.code == 401, f"Expected 401 for a retired secret, got {error.code}"
+        assert request(api_address(), "/stats")[0] == 200, "API refused the rotated token"
         command("token", "revoke", "smoke")
         try:
             request(api_address(), "/stats")
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens with scopes, status attribution, the audit log, rate limits, "
-              "notification outbox, its API, and SMTP delivery, persistent per-token retries, container recreation, "
-              "and non-root execution passed.")
+        print("Docker CLI/API sharing, API tokens with scopes and rotation, status attribution, the audit log, "
+              "rate limits, notification outbox, its API, and SMTP delivery, persistent per-token retries, container "
+              "recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)
