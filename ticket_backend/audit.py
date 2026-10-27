@@ -7,10 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 from ticket_backend.database import DEFAULT_DATABASE, connect
-from ticket_backend.validation import require_id, require_page, require_token_name
-
-
-MAX_RETENTION_DAYS = 3650
+from ticket_backend.validation import require_age_days, require_id, require_page, require_token_name
 
 
 def record_request(
@@ -62,10 +59,7 @@ def list_audit(
 
 def prune_audit(older_than_days: int, database: Path = DEFAULT_DATABASE) -> dict:
     """Delete recorded requests older than a number of days and return how many were deleted."""
-    if type(older_than_days) is not int or not 1 <= older_than_days <= MAX_RETENTION_DAYS:
-        raise ValueError(f"Age must be a whole number of days from 1 to {MAX_RETENTION_DAYS}.")
+    age = require_age_days(older_than_days)
     with closing(connect(database)) as connection, connection:
-        deleted = connection.execute(
-            "DELETE FROM api_audit_log WHERE created_at < datetime('now', ?)", (f"-{older_than_days} days",)
-        ).rowcount
+        deleted = connection.execute("DELETE FROM api_audit_log WHERE created_at < datetime('now', ?)", (age,)).rowcount
     return {"deleted": deleted}
