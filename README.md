@@ -13,7 +13,8 @@ filed them by email.
   limited to scopes and a number of requests per minute, optionally expiring, and
   managed from the terminal.
 - **Safe retries**: an optional idempotency key, private to the token that sent it,
-  makes a repeated submission return the original ticket instead of creating a duplicate.
+  makes a repeated submission return the original ticket instead of creating a duplicate,
+  until old keys are pruned.
 - **Audit log** of every request made with a token: which token, what route, which
   ticket, and the result, readable over HTTP by tokens with `audit:read`.
 - **Email notifications** through a transactional outbox, delivered over SMTP with
@@ -75,6 +76,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
 | `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
 | `audit prune --older-than DAYS` | Delete recorded API requests older than 1 to 3650 days |
+| `keys prune --older-than DAYS` | Delete idempotency keys saved more than 1 to 3650 days ago |
 
 Global options go before the command: `--database PATH` selects another SQLite
 file, and `--json` prints machine-readable output.
@@ -325,7 +327,7 @@ ticket_backend/
   api_audit.py              middleware that records each authenticated request
   audit.py                  audit log storage, listing, and pruning
   tickets.py                tickets, status history, comments, statistics
-  submissions.py            idempotency keys, scoped to each token
+  submissions.py            idempotency keys, scoped to each token, and their pruning
   tokens.py                 token creation, revocation, and authentication
   ratelimit.py              per-token request limits kept in memory
   notifications.py          outbox queries, delivery, and retries
@@ -361,6 +363,20 @@ stay in `ticket_submissions` and are not rewritten. Each belongs to the token re
 as its ticket's creator; keys whose ticket has no recorded creator, because it came
 from the terminal or predates attribution, stay shared by every caller as before, so
 no retry in flight during an upgrade creates a duplicate.
+
+Keys are kept until `keys prune --older-than DAYS` deletes those saved more than the
+given number of days ago, from every caller, so run it on a schedule to keep
+`ticket_submission_keys` from growing with every keyed submission:
+
+```text
+0 3 * * * cd /path/to/ticket-backend && python3 tickets.py keys prune --older-than 30
+```
+
+Tickets are never deleted, only the ability to replay their submission: a pruned key
+used again, with any content, creates a new ticket instead of returning the original
+or a 409. Choose an age well beyond how long any client keeps retrying one submission.
+Keys saved by earlier versions have no saved time, so they are pruned by the age of
+their ticket, which was created in the same transaction.
 
 **Authentication.** Tokens are 256-bit random values. Only their SHA-256 hashes are
 stored, so a lost token cannot be recovered, only revoked and replaced under a new
@@ -412,7 +428,7 @@ python scripts/smoke_docker.py   # needs Docker
 
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, idempotent
-retries and their per-token keys, token authentication, scopes, expiry, and rate limits,
+retries, their per-token keys, and pruning them, token authentication, scopes, expiry, and rate limits,
 the audit log, the CLI
 and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
 on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
@@ -422,7 +438,8 @@ CLI sees requests the API recorded in the audit log, that a token over its rate 
 gets 429 and is not audited, that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
-token's, that the image runs as a
+token's, that the CLI prunes an old key so the API's next retry creates a new ticket,
+that the image runs as a
 non-root user, and that `send-notifications` delivers through the image. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
 Actions runs ruff, the unit tests on Python 3.10, 3.11, and 3.14, and the Docker smoke
@@ -440,8 +457,10 @@ test.
   that limits by address in front of the API if it is exposed.
 - Authors are token names, not people, and terminal changes have no author (shown as
   `local`). Entries from before attribution existed have none either.
-- Idempotency keys never expire, and belong to a token's name, so a replacement
-  token cannot replay keys sent by the one it replaces. Keys saved by earlier versions
+- Idempotency keys are deleted only by `keys prune`, which needs an external
+  scheduler, and a key pruned while a client is still retrying lets that retry create a
+  duplicate. Keys belong to a token's name, so a replacement token cannot replay keys
+  sent by the one it replaces. Keys saved by earlier versions
   for tickets with no recorded creator remain shared by every caller.
 - The audit log is written after each request, not in the same transaction, so a
   crash or storage failure between the two leaves a completed request unrecorded.
