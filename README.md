@@ -72,6 +72,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `outbox [--status S] [--ticket ID] [--limit N] [--offset N]` | List queued notifications, oldest first |
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
 | `retry-notifications [ID ...]` | Requeue failed notifications |
+| `prune-notifications --older-than DAYS` | Delete notifications sent more than 1 to 3650 days ago |
 | `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
 | `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
@@ -282,6 +283,16 @@ python3 tickets.py outbox --status failed
 python3 tickets.py retry-notifications 4 7
 ```
 
+Sent notifications are kept until `prune-notifications --older-than DAYS` deletes
+those sent more than the given number of days ago. Pending and failed notifications
+are never pruned, so nothing still waiting to be sent or retried is lost. A schedule
+keeps the outbox, which holds copies of ticket messages and requester emails, from
+growing without limit:
+
+```text
+0 3 * * * cd /path/to/ticket-backend && python3 tickets.py prune-notifications --older-than 30
+```
+
 The same operations are available over HTTP to tokens with the notification scopes,
 so failures can be checked and retried without shell access to the server.
 `POST /notifications/retry` follows the same rules as the command: a missing ID
@@ -470,6 +481,6 @@ test.
 - Requester emails are stored in plain text in the database, and hidden only from API
   tokens without `emails:read`. An address an SMTP server quotes in a different form
   than the recipient, such as an encoded one, is not hidden from `last_error`.
-- Notifications have no unsubscribe, bounce handling, HTML version, or retention
-  policy, and `send-notifications` needs an external scheduler. A permanently refused
-  recipient is retried like any other failure.
+- Notifications have no unsubscribe, bounce handling, or HTML version, and
+  `send-notifications` and `prune-notifications` need an external scheduler. A
+  permanently refused recipient is retried like any other failure.
