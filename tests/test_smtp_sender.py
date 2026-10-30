@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 from ticket_backend import cli
 from ticket_backend.notifications import deliver_notifications, list_notifications
+from ticket_backend.suppressions import list_suppressions
 from ticket_backend.tickets import create_ticket, set_status
 from ticket_backend.mailer import DeliveryError, SmtpSender, SmtpSettings, build_message, settings_from_environment
 from smtp_stub import SmtpStub
@@ -146,6 +147,8 @@ class SmtpDeliveryTests(unittest.TestCase):
         refused = list_notifications(self.database)[0]
         self.assertEqual((refused["status"], refused["attempts"]), ("failed", 1))
         self.assertEqual(refused["last_error"], "Recipient gone@example.com refused: 550 5.1.1 No such user")
+        self.assertEqual([(row["address"], row["reason"]) for row in list_suppressions(self.database)],
+                         [("gone@example.com", "refused")])
 
     def test_only_permanent_recipient_replies_are_treated_as_permanent(self):
         def refusal(error):

@@ -73,6 +73,8 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
 | `retry-notifications [ID ...]` | Requeue failed notifications |
 | `prune-notifications --older-than DAYS` | Delete notifications sent more than 1 to 3650 days ago |
+| `suppressions list [--limit N] [--offset N]` | List addresses notifications are not sent to, newest first |
+| `suppressions add ADDRESS` / `suppressions remove ADDRESS` | Stop / resume notifications to an address |
 | `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
 | `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
@@ -93,7 +95,7 @@ then needs both `--title` and `--message`.
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Success |
-| `1` | Ticket, token, or notification not found |
+| `1` | Ticket, token, notification, or suppression not found |
 | `2` | Invalid input or configuration, or a storage error |
 | `3` | Idempotency key already used for different content |
 | `4` | SMTP server unreachable, or it rejected STARTTLS or the login |
@@ -288,6 +290,23 @@ python3 tickets.py outbox --status failed
 python3 tickets.py retry-notifications 4 7
 ```
 
+A permanently refused address is also **suppressed**: later notifications to it, and
+any already queued, are marked `failed` with `Not sent: ... is suppressed` instead of
+being sent, without using an attempt. Addresses match without regard to case. Use
+`suppressions add` to stop notifications to an address by hand, for example when a
+requester asks, and `suppressions remove` once an address works again:
+
+```sh
+python3 tickets.py suppressions list
+python3 tickets.py suppressions remove pat@example.com
+python3 tickets.py retry-notifications
+```
+
+Removing a suppression does not resend anything by itself. `retry-notifications`
+skips notifications to suppressed addresses, and naming one exits with code 2, so
+remove the suppression first. An address keeps its first suppression, so suppressing a
+refused address by hand does not change its recorded reason or server reply.
+
 Sent notifications are kept until `prune-notifications --older-than DAYS` deletes
 those sent more than the given number of days ago. Pending and failed notifications
 are never pruned, so nothing still waiting to be sent or retried is lost. A schedule
@@ -347,6 +366,7 @@ ticket_backend/
   tokens.py                 token creation, revocation, and authentication
   ratelimit.py              per-token request limits kept in memory
   notifications.py          outbox queries, delivery, and retries
+  suppressions.py           addresses notifications are not sent to
   mailer.py                 SMTP settings and sender
   validation.py             input checks shared by the storage modules
   database.py, schema.sql   connections and schema upgrades
@@ -488,4 +508,5 @@ test.
   than the recipient, such as an encoded one, is not hidden from `last_error`.
 - Notifications have no unsubscribe or HTML version, and `send-notifications` and
   `prune-notifications` need an external scheduler. Bounces that arrive later by email,
-  after the server accepted the message, are not read.
+  after the server accepted the message, are not read, so only refusals during the SMTP
+  session suppress an address.

@@ -96,3 +96,14 @@ CREATE TABLE IF NOT EXISTS api_audit_log (
 
 CREATE INDEX IF NOT EXISTS api_audit_log_token ON api_audit_log(token, id);
 CREATE INDEX IF NOT EXISTS api_audit_log_ticket_id ON api_audit_log(ticket_id, id);
+
+-- Addresses no notification is sent to. reason is 'refused' after a permanent SMTP refusal, whose reply is kept in
+-- detail, or 'manual' from the terminal. notification_id has no foreign key because notifications can be pruned.
+CREATE TABLE IF NOT EXISTS notification_suppressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    reason TEXT NOT NULL,
+    detail TEXT,
+    notification_id INTEGER,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

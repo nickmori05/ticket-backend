@@ -14,6 +14,9 @@ from ticket_backend.notifications import (
     list_notifications, prune_notifications, retry_notifications,
 )
 from ticket_backend.submissions import prune_submission_keys
+from ticket_backend.suppressions import (
+    SuppressionNotFoundError, list_suppressions, remove_suppression, suppress_address,
+)
 from ticket_backend.tickets import (
     STATUSES, IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
     list_tickets, set_status, statistics, ticket_history,
@@ -66,6 +69,15 @@ def parser() -> argparse.ArgumentParser:
     retry.add_argument("ids", type=int, nargs="*", metavar="ID", help="Notifications to requeue; default all failed")
     prune = commands.add_parser("prune-notifications", help="Delete notifications sent more than a number of days ago")
     prune.add_argument("--older-than", type=int, required=True, metavar="DAYS")
+    suppressions = commands.add_parser("suppressions", help="Manage addresses that notifications are not sent to")
+    suppression_actions = suppressions.add_subparsers(dest="action", required=True)
+    suppressions_list = suppression_actions.add_parser("list", help="Show suppressed addresses, newest first")
+    suppressions_list.add_argument("--limit", type=int, default=20)
+    suppressions_list.add_argument("--offset", type=int, default=0)
+    suppressions_add = suppression_actions.add_parser("add", help="Stop sending notifications to an address")
+    suppressions_add.add_argument("address")
+    suppressions_remove = suppression_actions.add_parser("remove", help="Send notifications to an address again")
+    suppressions_remove.add_argument("address")
     token = commands.add_parser("token", help="Manage API tokens")
     actions = token.add_subparsers(dest="action", required=True)
     token_create = actions.add_parser("create", help="Create a token; it is shown only once")
@@ -141,6 +153,17 @@ def display(command: str, result, action: str | None = None) -> None:
             print(f"#{row['id']} requeued for {row['recipient']}: {row['subject']}")
     elif command == "prune-notifications":
         print(f"Deleted {result['deleted']} sent notification" + ("." if result["deleted"] == 1 else "s."))
+    elif command == "suppressions" and action == "list":
+        if not result:
+            print("No suppressed addresses.")
+        for row in result:
+            print(f"#{row['id']} {row['address']} ({row['reason']}, {row['created_at']} UTC)")
+            if row["detail"]:
+                print(f"  {row['detail']}")
+    elif command == "suppressions" and action == "add":
+        print(f"Notifications to {result['address']} are suppressed ({result['reason']}, {result['created_at']} UTC).")
+    elif command == "suppressions":
+        print(f"Removed the suppression for {result['address']}; retry its failed notifications to send them.")
     elif command == "stats":
         print(f"Total: {result['total']}")
         for status, count in result["by_status"].items():
@@ -203,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
 
     0 means success, 1 a missing ticket, token, or notification, 2 invalid input or a storage error, 3 a reused
     submission key with different content, 4 an unavailable SMTP server, and 130 cancellation.
+    A missing suppression also exits with 1.
     """
     args = parser().parse_args(argv)
     try:
@@ -243,6 +267,12 @@ def main(argv: list[str] | None = None) -> int:
             result = prune_audit(args.older_than, args.database)
         elif args.command == "keys":
             result = prune_submission_keys(args.older_than, args.database)
+        elif args.command == "suppressions" and args.action == "list":
+            result = list_suppressions(args.database, args.limit, offset=args.offset)
+        elif args.command == "suppressions" and args.action == "add":
+            result = suppress_address(args.address, args.database)
+        elif args.command == "suppressions":
+            result = remove_suppression(args.database, address=args.address)
         elif args.action == "create":
             result = create_token(args.name, args.database, scopes=args.scopes, expires_in_days=args.expires_in,
                                   rate_limit=args.rate_limit)
@@ -256,6 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     except IdempotencyConflictError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 3
+    except SuppressionNotFoundError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
     except DeliveryError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 4

@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 
 from ticket_backend.database import DEFAULT_DATABASE, connect
+from ticket_backend.suppressions import find_suppression, record_refusal
 from ticket_backend.validation import require_age_days, require_id, require_page
 
 
@@ -86,8 +87,9 @@ def count_due_notifications(database: Path = DEFAULT_DATABASE) -> int:
 def retry_notifications(database: Path = DEFAULT_DATABASE, notification_ids: list[int] | None = None) -> list[dict]:
     """Move failed notifications back to pending with a fresh attempt budget, due immediately.
 
-    With no IDs, every failed notification is requeued. Named IDs must all exist and be failed, or nothing changes.
-    The last error is kept until the next attempt records its own outcome.
+    With no IDs, every failed notification to an address that is not suppressed is requeued. Named IDs must all
+    exist, be failed, and go to an address that is not suppressed, or nothing changes. The last error is kept until
+    the next attempt records its own outcome.
     """
     if notification_ids is not None:
         if not isinstance(notification_ids, (list, tuple)) or not notification_ids:
@@ -98,17 +100,23 @@ def retry_notifications(database: Path = DEFAULT_DATABASE, notification_ids: lis
             connection.execute("BEGIN IMMEDIATE")
             if notification_ids is None:
                 notification_ids = [row["id"] for row in connection.execute(
-                    "SELECT id FROM ticket_notifications WHERE status = 'failed' ORDER BY id"
+                    """SELECT id FROM ticket_notifications WHERE status = 'failed' AND NOT EXISTS (
+                           SELECT 1 FROM notification_suppressions
+                           WHERE address = ticket_notifications.recipient COLLATE NOCASE
+                       ) ORDER BY id"""
                 )]
             for identifier in notification_ids:
                 row = connection.execute(
-                    "SELECT status FROM ticket_notifications WHERE id = ?", (identifier,)
+                    "SELECT status, recipient FROM ticket_notifications WHERE id = ?", (identifier,)
                 ).fetchone()
                 if row is None:
                     raise NotificationNotFoundError(f"Notification #{identifier} was not found.")
                 if row["status"] != "failed":
                     raise NotificationStateError(f"Notification #{identifier} is {row['status']}; "
                                                  "only failed notifications can be retried.")
+                if find_suppression(connection, row["recipient"]) is not None:
+                    raise NotificationStateError(f"Notification #{identifier} is to a suppressed address; "
+                                                 "remove the suppression before retrying it.")
             connection.executemany(
                 """UPDATE ticket_notifications SET status = 'pending', attempts = 0,
                    next_attempt_at = CURRENT_TIMESTAMP WHERE id = ?""",
@@ -145,7 +153,8 @@ def deliver_notifications(
 
     send() reports failure by raising. A failed attempt is retried after retry_delay seconds, doubling each
     time up to a day, until max_attempts is reached and the notification is marked failed. An exception with a true
-    permanent attribute, such as a recipient the server refused with a 5xx reply, marks it failed at once.
+    permanent attribute, such as a recipient the server refused with a 5xx reply, marks it failed at once and
+    suppresses its recipient. A notification to a suppressed address is marked failed without calling send().
     """
     if not callable(send):
         raise ValueError("Sender must be callable.")
@@ -164,6 +173,18 @@ def deliver_notifications(
             )
         ]
         for notification in due:
+            suppression = find_suppression(connection, notification["recipient"])
+            if suppression is not None:
+                # Not an attempt: nothing was sent, so a retry after the suppression is removed gets a full budget.
+                with connection:
+                    skipped = connection.execute(
+                        """UPDATE ticket_notifications SET status = 'failed', last_error = ?
+                           WHERE id = ? AND status = 'pending' AND attempts = ?""",
+                        (f"Not sent: {notification['recipient']} is suppressed ({suppression['reason']}, "
+                         f"{suppression['created_at']} UTC).", notification["id"], notification["attempts"]),
+                    ).rowcount
+                counts["failed"] += skipped
+                continue
             # Count the attempt and schedule its retry before sending, so a crash during send() or a second
             # sender running at the same time waits for the delay instead of sending again straight away.
             delay = min(retry_delay * 2 ** notification["attempts"], 86_400)
@@ -183,12 +204,14 @@ def deliver_notifications(
             except Exception as error:
                 permanent = getattr(error, "permanent", False) is True
                 outcome = "failed" if permanent or notification["attempts"] >= max_attempts else "retrying"
+                message = (str(error) or type(error).__name__)[:500]
                 with connection:
                     connection.execute(
                         "UPDATE ticket_notifications SET status = ?, last_error = ? WHERE id = ?",
-                        ("failed" if outcome == "failed" else "pending",
-                         (str(error) or type(error).__name__)[:500], notification["id"]),
+                        ("failed" if outcome == "failed" else "pending", message, notification["id"]),
                     )
+                    if permanent:
+                        record_refusal(connection, notification, message)
             else:
                 outcome = "sent"
                 with connection:
