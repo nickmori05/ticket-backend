@@ -1,6 +1,7 @@
 """Suppressed addresses: recipients no notification is sent to until the suppression is removed.
 
-An address is suppressed when a mail server refuses it permanently, or by hand from the terminal. Addresses are
+An address is suppressed when a mail server refuses it permanently, when its owner follows an unsubscribe link, or
+by hand. Addresses are
 compared without regard to case, as almost every mail server treats them.
 """
 
@@ -12,7 +13,7 @@ from ticket_backend.database import DEFAULT_DATABASE, connect
 from ticket_backend.validation import optional_email, require_id, require_page
 
 
-SUPPRESSION_REASONS = ("refused", "manual")
+SUPPRESSION_REASONS = ("refused", "manual", "unsubscribed")
 
 
 class SuppressionNotFoundError(LookupError):
@@ -50,14 +51,18 @@ def list_suppressions(database: Path = DEFAULT_DATABASE, limit: int = 20, *, off
         ]
 
 
-def suppress_address(address: str, database: Path = DEFAULT_DATABASE) -> dict:
-    """Suppress an address by hand and return its suppression; an existing suppression is returned unchanged."""
+def suppress_address(
+    address: str, database: Path = DEFAULT_DATABASE, *, reason: str = "manual", detail: str | None = None,
+) -> dict:
+    """Suppress an address and return its suppression; an existing suppression is returned unchanged."""
     address = _require_address(address)
+    if reason not in ("manual", "unsubscribed"):
+        raise ValueError("Suppression reason must be manual or unsubscribed.")
     with closing(connect(database)) as connection, connection:
         connection.execute(
-            """INSERT INTO notification_suppressions (address, reason)
-               SELECT ?1, 'manual' WHERE NOT EXISTS (SELECT 1 FROM notification_suppressions WHERE address = ?1)""",
-            (address,),
+            """INSERT INTO notification_suppressions (address, reason, detail)
+               SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM notification_suppressions WHERE address = ?1)""",
+            (address, reason, detail),
         )
         return dict(find_suppression(connection, address))
 

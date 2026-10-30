@@ -10,6 +10,9 @@ import os
 import re
 import smtplib
 import ssl
+from urllib.parse import urlsplit
+
+from ticket_backend.unsubscribe import require_secret, secret_from_environment, unsubscribe_token
 
 
 SECURITY_MODES = ("starttls", "ssl", "none")
@@ -104,8 +107,45 @@ def settings_from_environment(environment: Mapping[str, str] = os.environ) -> Sm
     )
 
 
-def build_message(notification: dict, settings: SmtpSettings) -> EmailMessage:
-    """Turn an outbox row into a plain-text email with stable Message-ID and Auto-Submitted headers."""
+@dataclass(frozen=True)
+class UnsubscribeLinks:
+    """Where unsubscribe links point and the secret that signs them. The secret is kept out of repr."""
+
+    base_url: str
+    secret: str = field(repr=False)
+
+    def __post_init__(self):
+        require_secret(self.secret)
+        parts = urlsplit(self.base_url) if isinstance(self.base_url, str) else None
+        if parts is None or parts.scheme not in ("https", "http") or not parts.hostname or parts.query \
+                or parts.fragment or any(character.isspace() for character in self.base_url):
+            raise ValueError("TICKETS_UNSUBSCRIBE_URL must be an absolute URL like https://support.example.com.")
+        # RFC 8058 requires HTTPS; plain HTTP is allowed only for an API on this machine, as in development.
+        if parts.scheme == "http" and not _loopback(parts.hostname):
+            raise ValueError("TICKETS_UNSUBSCRIBE_URL must use https unless the API is on localhost.")
+        object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+
+    def url_for(self, ticket_id: int, address: str) -> str:
+        return f"{self.base_url}/unsubscribe/{unsubscribe_token(self.secret, ticket_id, address)}"
+
+
+def unsubscribe_links_from_environment(environment: Mapping[str, str] = os.environ) -> UnsubscribeLinks | None:
+    """Read TICKETS_UNSUBSCRIBE_URL and TICKETS_UNSUBSCRIBE_SECRET, returning None when neither is set."""
+    base_url = environment.get("TICKETS_UNSUBSCRIBE_URL", "").strip()
+    secret = secret_from_environment(environment)
+    if not base_url and secret is None:
+        return None
+    if not base_url or secret is None:
+        raise ValueError("Set TICKETS_UNSUBSCRIBE_URL and TICKETS_UNSUBSCRIBE_SECRET together.")
+    return UnsubscribeLinks(base_url, secret)
+
+
+def build_message(notification: dict, settings: SmtpSettings, unsubscribe_url: str | None = None) -> EmailMessage:
+    """Turn an outbox row into a plain-text email with stable Message-ID and Auto-Submitted headers.
+
+    With an unsubscribe URL, the message offers RFC 8058 one-click unsubscribe in its headers and repeats the link at
+    the end of the body for mail clients that do not show it.
+    """
     message = EmailMessage(policy=MESSAGE_POLICY)
     message["From"] = settings.sender
     message["To"] = notification["recipient"]
@@ -115,7 +155,17 @@ def build_message(notification: dict, settings: SmtpSettings) -> EmailMessage:
     stamp = re.sub(r"\D", "", notification["created_at"])
     message["Message-ID"] = f"<ticket-notification-{notification['id']}.{stamp}@{settings.domain}>"
     message["Auto-Submitted"] = "auto-generated"
-    message.set_content(notification["body"])
+    body = notification["body"]
+    if unsubscribe_url is not None:
+        message["List-Unsubscribe"] = f"<{unsubscribe_url}>"
+        message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+        body = f"{body.rstrip()}\n\n-- \nTo stop receiving emails about your tickets, open:\n{unsubscribe_url}\n"
+    message.set_content(body)
+    if unsubscribe_url is not None:
+        # A URL has nowhere to fold, and past 78 characters the default policy would send it as an RFC 2047 encoded
+        # word that mail clients do not read as a link. Let headers use the 998 characters RFC 5322 allows instead;
+        # the body was already encoded above with short lines.
+        message.policy = MESSAGE_POLICY.clone(max_line_length=998)
     return message
 
 
@@ -142,11 +192,13 @@ class SmtpSender:
     """Send outbox notifications over one SMTP connection, reconnecting after a failed message.
 
     Use it as a context manager: entering connects and logs in, so an unreachable or misconfigured server is
-    reported before any notification is claimed. Pass the sender to deliver_notifications().
+    reported before any notification is claimed. Pass the sender to deliver_notifications(). With unsubscribe links,
+    every message carries a signed link that suppresses its recipient.
     """
 
-    def __init__(self, settings: SmtpSettings):
+    def __init__(self, settings: SmtpSettings, unsubscribe: UnsubscribeLinks | None = None):
         self.settings = settings
+        self.unsubscribe = unsubscribe
         self._connection: smtplib.SMTP | None = None
 
     def __enter__(self) -> "SmtpSender":
@@ -192,7 +244,10 @@ class SmtpSender:
     def __call__(self, notification: dict) -> None:
         self.open()
         try:
-            self._connection.send_message(build_message(notification, self.settings))
+            url = None
+            if self.unsubscribe is not None:
+                url = self.unsubscribe.url_for(notification["ticket_id"], notification["recipient"])
+            self._connection.send_message(build_message(notification, self.settings, url))
         except (smtplib.SMTPException, OSError) as error:
             # The session may be mid-transaction or gone, so start the next message on a fresh connection.
             self.close()
