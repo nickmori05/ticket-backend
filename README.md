@@ -254,7 +254,8 @@ limit:
 | `TICKETS_SMTP_PORT` | `send-notifications` | Defaults to 587, 465, or 25 to match the security mode |
 | `TICKETS_SMTP_USERNAME`, `TICKETS_SMTP_PASSWORD` | `send-notifications` | Optional login; set both or neither |
 | `TICKETS_SMTP_TIMEOUT` | `send-notifications` | Seconds to wait for the server, default 10 |
-| `TICKETS_UNSUBSCRIBE_SECRET` | API | At least 32 characters that sign [unsubscribe links](#unsubscribe-links); without it, every link is refused |
+| `TICKETS_UNSUBSCRIBE_SECRET` | API, `send-notifications` | At least 32 characters that sign [unsubscribe links](#unsubscribe-links); the same value in both |
+| `TICKETS_UNSUBSCRIBE_URL` | `send-notifications` | The API's public address, such as `https://support.example.com`; links are added when this and the secret are set |
 
 ## Email notifications
 
@@ -375,6 +376,23 @@ URL is the credential. Requests to these pages are not written to the audit log,
 records only token requests; the suppression records the ticket the link came from.
 Generate a secret with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
 Changing it invalidates every link already sent.
+
+To put the link in emails, give `send-notifications` the same secret and the address
+where requesters reach the API. Each message then carries `List-Unsubscribe` and
+`List-Unsubscribe-Post: List-Unsubscribe=One-Click` headers, which mail clients show
+as an unsubscribe button, and the link again at the end of the body:
+
+```sh
+TICKETS_SMTP_HOST=smtp.example.com TICKETS_SMTP_FROM=support@example.com \
+TICKETS_UNSUBSCRIBE_URL=https://support.example.com TICKETS_UNSUBSCRIBE_SECRET=... \
+python3 tickets.py send-notifications
+```
+
+The URL must use `https`, as RFC 8058 requires, unless it points at localhost, and may
+include a path prefix if the API is served under one. Setting only one of the two
+variables, a URL that is not absolute, or a short secret exits with code 2 before
+connecting. Links are built when a message is sent, not stored in the outbox, so a
+changed URL or secret applies to every message sent afterwards, including retries.
 
 ## Docker
 
@@ -550,7 +568,10 @@ test.
 - Requester emails are stored in plain text in the database, and hidden only from API
   tokens without `emails:read`. An address an SMTP server quotes in a different form
   than the recipient, such as an encoded one, is not hidden from `last_error`.
-- Notifications have no unsubscribe or HTML version, and `send-notifications` and
+- Notifications have no HTML version, and `send-notifications` and
   `prune-notifications` need an external scheduler. Bounces that arrive later by email,
   after the server accepted the message, are not read, so only refusals during the SMTP
-  session suppress an address.
+  session suppress an address. Mail providers honour one-click unsubscribe only for
+  messages with a DKIM signature that covers the `List-Unsubscribe` headers; signing is
+  left to the SMTP relay. Unsubscribing stops every notification to the address, not
+  only those about one ticket, and the pages are not rate limited.

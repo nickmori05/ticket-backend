@@ -8,7 +8,9 @@ import sys
 
 from ticket_backend.audit import list_audit, prune_audit
 from ticket_backend.database import DEFAULT_DATABASE
-from ticket_backend.mailer import DeliveryError, SmtpSender, settings_from_environment
+from ticket_backend.mailer import (
+    DeliveryError, SmtpSender, settings_from_environment, unsubscribe_links_from_environment,
+)
 from ticket_backend.notifications import (
     NOTIFICATION_STATUSES, NotificationNotFoundError, count_due_notifications, deliver_notifications,
     list_notifications, prune_notifications, retry_notifications,
@@ -210,13 +212,14 @@ def send_notifications(args: argparse.Namespace) -> dict:
     """Send one batch of due notifications over SMTP and return the delivery counts."""
     # Settings and arguments are checked, and the server reached, before any notification is claimed.
     settings = settings_from_environment()
+    unsubscribe = unsubscribe_links_from_environment()
     if not 1 <= args.limit <= 100:
         raise ValueError("Limit must be between 1 and 100.")
     if args.max_attempts < 1 or args.retry_delay < 0:
         raise ValueError("Maximum attempts must be positive and the retry delay must not be negative.")
     if count_due_notifications(args.database) == 0:
         return {"sent": 0, "retrying": 0, "failed": 0}
-    with SmtpSender(settings) as sender:
+    with SmtpSender(settings, unsubscribe) as sender:
         return deliver_notifications(sender, args.database, limit=args.limit,
                                      max_attempts=args.max_attempts, retry_delay=args.retry_delay)
 
