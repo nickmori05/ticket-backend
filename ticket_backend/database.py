@@ -33,6 +33,8 @@ def _add_missing_columns(connection: sqlite3.Connection) -> None:
         ("api_tokens", "scopes", "TEXT"), ("api_tokens", "expires_at", "TIMESTAMP"),
         ("api_tokens", "rate_limit", "INTEGER"), ("api_tokens", "rotated_at", "TIMESTAMP"),
         ("api_tokens", "previous_token_hash", "TEXT"), ("api_tokens", "previous_expires_at", "TIMESTAMP"),
+        ("ticket_comments", "edited_at", "TIMESTAMP"), ("ticket_comments", "edited_by", "TEXT"),
+        ("ticket_comments", "deleted_at", "TIMESTAMP"), ("ticket_comments", "deleted_by", "TEXT"),
     ):
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:

@@ -54,7 +54,8 @@ def main() -> int:
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
         with urlopen(Request(base + path, data=body, headers=headers, method=method), timeout=5) as response:
-            return response.status, json.load(response)
+            content = response.read()
+            return response.status, json.loads(content) if content else None
 
     def api_address():
         address = run("port", "api", "8000").strip()
@@ -135,6 +136,23 @@ def main() -> int:
         status, comment = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "From HTTP"})
         assert status == 201 and comment["author"] == "smoke"
         assert command("comments", http_id)[0]["author"] == "smoke", "CLI did not see the comment author"
+        comment_url = f"/tickets/{http_id}/comments/{comment['id']}"
+        status, edited = request(api_address(), comment_url, "PATCH", {"body": "From HTTP, edited"})
+        assert status == 200 and edited["edited_by"] == "smoke" and edited["edited_at"], "API did not edit a comment"
+        assert command("comments", http_id) == [edited], "CLI did not see the comment edit"
+        local_comment = command("comment", http_id, "From the terminal")
+        # The reader lacks tickets:write, and the API's token did not write the terminal's comment.
+        for method, url, body in (("PATCH", comment_url, {"body": "Not mine"}),
+                                  ("DELETE", f"/tickets/{http_id}/comments/{local_comment['id']}", None)):
+            try:
+                request(api_address(), url, method, body, bearer=reader["token"] if method == "PATCH" else None)
+                raise AssertionError(f"API allowed {method} on a comment the token may not change")
+            except HTTPError as error:
+                assert error.code == 403, f"Expected 403 changing another author's comment, got {error.code}"
+        assert request(api_address(), comment_url, "DELETE") == (204, None), "API did not delete its own comment"
+        assert command("comments", http_id) == [local_comment], "CLI still listed a deleted comment"
+        command("delete-comment", http_id, str(local_comment["id"]))
+        assert command("comments", http_id) == [], "CLI did not delete a comment"
         status, restored = request(api_address(), f"/tickets/{http_id}")
         assert status == 200 and restored["status"] == "closed"
         status, replayed = request(api_address(), "/tickets", "POST", payload, key)
@@ -197,9 +215,9 @@ def main() -> int:
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens with scopes and rotation, status attribution, the audit log, "
-              "rate limits, notification outbox, its API, and SMTP delivery, persistent per-token retries and key "
-              "pruning, container recreation, and non-root execution passed.")
+        print("Docker CLI/API sharing, API tokens with scopes and rotation, status attribution, comment edits, "
+              "the audit log, rate limits, notification outbox, its API, and SMTP delivery, persistent per-token "
+              "retries and key pruning, container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)

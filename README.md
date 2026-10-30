@@ -4,8 +4,8 @@
 
 A support-ticket tracker built on Python and SQLite, with a command line and an
 HTTP API that share one database. Tickets move between `open`, `in_progress`, and
-`closed` with a recorded history, collect comments, and can notify the person who
-filed them by email.
+`closed` with a recorded history, collect comments that can be edited or deleted, and
+can notify the person who filed them by email.
 
 - **CLI** using only the standard library: create, search, and update tickets, with
   text or JSON output and stable exit codes.
@@ -68,6 +68,8 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `status ID STATUS [--note TEXT]` | Change status to `open`, `in_progress`, or `closed` |
 | `history ID` | Show recorded status changes |
 | `comment ID BODY` / `comments ID` | Add a comment / list comments, oldest first |
+| `edit-comment ID COMMENT_ID BODY` | Replace a comment's text |
+| `delete-comment ID COMMENT_ID` | Delete a comment's text and hide it from listings |
 | `stats` | Count tickets by status |
 | `outbox [--status S] [--ticket ID] [--limit N] [--offset N]` | List queued notifications, oldest first |
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
@@ -120,6 +122,8 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /tickets/{id}/history` | `tickets:read` | Recorded status changes, each with its `author` |
 | `POST /tickets/{id}/comments` | `tickets:write` | Add a comment from JSON `body`; returns 201 |
 | `GET /tickets/{id}/comments` | `tickets:read` | Comments, oldest first |
+| `PATCH /tickets/{id}/comments/{comment_id}` | `tickets:write` | Replace the text of the token's own comment from JSON `body` |
+| `DELETE /tickets/{id}/comments/{comment_id}` | `tickets:write` | Delete the token's own comment; returns 204 |
 | `GET /stats` | `tickets:read` | Ticket counts by status |
 | `GET /notifications` | `notifications:read` | Outbox, oldest first, with optional `status`, `ticket_id`, `limit`, and `offset` |
 | `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
@@ -141,18 +145,19 @@ curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
 A missing, unknown, revoked, or expired token returns 401 before any ticket is read,
 and a token without the route's scope returns 403 with
 `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. A token over its
-[rate limit](#rate-limits) returns 429 with `Retry-After`. A missing ticket
-or notification returns 404, a reused idempotency key with different content or a
+[rate limit](#rate-limits) returns 429 with `Retry-After`, and changing another
+author's [comment](#comments) 403. A missing ticket, comment, or notification
+returns 404, a reused idempotency key with different content or a
 retry of a notification that is not `failed` 409, invalid fields 422, and a storage
-failure 503 without exposing file paths. Unknown JSON fields are rejected. Ticket creation, status changes, and comments record the
-name of the token that made them.
+failure 503 without exposing file paths. Unknown JSON fields are rejected. Ticket creation, status changes, and comments and their
+edits record the name of the token that made them.
 
 ### Token scopes and expiry
 
 | Scope | Grants |
 | --- | --- |
 | `tickets:read` | Reading tickets, history, comments, and statistics |
-| `tickets:write` | Creating tickets, changing status, and adding comments |
+| `tickets:write` | Creating tickets, changing status, and adding, editing, and deleting its own comments |
 | `emails:read` | Seeing requester emails; without it, `email` and `recipient` are always `null` in responses |
 | `notifications:read` | Reading the outbox, including subjects and bodies, which repeat ticket titles, messages, and notes |
 | `notifications:write` | Requeueing failed notifications |
@@ -234,6 +239,44 @@ Counts are kept in the API process's memory, so they start again when it restart
 and each process counts separately: run one API process (as Docker Compose does), or
 expect each of `uvicorn --workers N` to allow the full limit. The first refused
 request after an accepted one is logged as a warning naming the token.
+
+## Comments
+
+Comments are listed oldest first with their IDs, and can be corrected or removed:
+
+```sh
+python3 tickets.py comments 1
+python3 tickets.py edit-comment 1 3 "Asked for the full logs"
+python3 tickets.py delete-comment 1 4
+```
+
+An edit replaces the text and records when and by whom, which listings show next to
+the comment; saving the same text again records nothing. A deletion empties the
+comment and hides it from listings, keeping only who deleted it and when, so its ID
+is never reused. Neither keeps the replaced text, because the usual reason to remove
+a comment is that it should not have been written, such as a pasted password: the old
+text is overwritten in the database file rather than left in its free space. A
+deleted comment cannot be edited or deleted again, and a comment ID only matches on
+its own ticket. Edits and deletions leave the ticket's status, history, and
+notifications alone. The terminal can change any comment, since anyone who can run it
+can already open the database.
+
+Over HTTP, a token with `tickets:write` can edit or delete only the comments it wrote,
+identified by its name, so a [rotated](#rotating-tokens) token keeps its comments.
+Another author's comment, including one added from the terminal, returns 403 and is
+left unchanged; a missing or deleted comment, or one on another ticket, returns 404.
+
+```sh
+curl -X PATCH http://127.0.0.1:8000/tickets/1/comments/3 \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"body":"Asked for the full logs"}'
+curl -X DELETE http://127.0.0.1:8000/tickets/1/comments/4 -H "Authorization: Bearer $TICKETS_TOKEN"
+```
+
+Responses include `edited_at` and `edited_by`, `null` until a comment is edited and
+`null` in `edited_by` for an edit from the terminal. Both changes appear in the
+[audit log](#audit-log) under the comment's ticket, including refused attempts.
 
 ## Audit log
 
@@ -455,6 +498,11 @@ crash mid-send or a second sender waits for the retry delay instead of sending a
 at once. Delivery is at least once: a process that stops after sending but before
 recording success sends that message again, with the same `Message-ID`.
 
+**Comment edits.** Edits and deletions take the write lock, check the comment
+belongs to the ticket and has not been deleted, and update it in one transaction.
+Their connections turn on SQLite's `secure_delete`, which zeroes the space the old
+text occupied instead of leaving it readable in free pages.
+
 **Schema upgrades.** Each connection applies `schema.sql`, which creates any missing
 tables and indexes, then adds columns introduced since a database was created.
 Existing rows and column definitions are never rewritten, so databases from earlier
@@ -474,6 +522,7 @@ python scripts/smoke_docker.py   # needs Docker
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, idempotent
 retries, their per-token keys, and pruning them, token authentication, scopes, expiry, rotation, and rate limits,
+comment edits and deletions,
 the audit log, the CLI
 and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
 on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
@@ -481,7 +530,9 @@ builds the image and checks that the API and CLI containers share data, that a
 read-only token cannot write, see emails, or read the outbox or audit log, that the
 CLI sees requests the API recorded in the audit log, that a token over its rate limit
 gets 429 and is not audited, that a rotated token keeps its idempotency keys and
-accepts its previous secret only during the grace period, that the API sees
+accepts its previous secret only during the grace period, that a token can edit
+and delete its own comments but not the terminal's, with the CLI seeing both changes,
+that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the CLI prunes an old key so the API's next retry creates a new ticket,
@@ -516,7 +567,13 @@ test.
   crash or storage failure between the two leaves a completed request unrecorded.
   Requests without a valid token are not recorded, the client address is the proxy's
   when one is in front of the API, and old rows are deleted only by `audit prune`.
-- Comments cannot be edited or deleted, and a ticket's email cannot be changed.
+- Over HTTP, only a comment's author can change it; there is no moderator scope, so
+  removing someone else's comment needs the terminal. Comments written from the
+  terminal can only be changed there.
+- A ticket's email cannot be changed. Comment edits keep no earlier versions, so a
+  reader cannot see what a comment said before it was edited or deleted. Replaced
+  text is overwritten in the database file, but may survive in backups, in a copy
+  made before the change, or in the filesystem's own free space.
 - Requester emails are stored in plain text in the database, and hidden only from API
   tokens without `emails:read`. An address an SMTP server quotes in a different form
   than the recipient, such as an encoded one, is not hidden from `last_error`.

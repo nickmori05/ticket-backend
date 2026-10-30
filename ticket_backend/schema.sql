@@ -44,7 +44,13 @@ CREATE TABLE IF NOT EXISTS ticket_comments (
     ticket_id INTEGER NOT NULL REFERENCES tickets(id),
     body TEXT NOT NULL,
     author TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Set by the last edit. edited_by and deleted_by are token names, or NULL for changes from the terminal.
+    edited_at TIMESTAMP,
+    edited_by TEXT,
+    -- A deleted comment keeps its row with an empty body, so its ID is never reused, and is left out of listings.
+    deleted_at TIMESTAMP,
+    deleted_by TEXT
 );
 
 CREATE INDEX IF NOT EXISTS ticket_comments_ticket_id ON ticket_comments(ticket_id, id);
