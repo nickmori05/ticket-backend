@@ -109,7 +109,8 @@ reopened, and setting the current status again records nothing.
 
 ## HTTP API
 
-Every endpoint except `/health` and the docs requires `Authorization: Bearer TOKEN`.
+Every endpoint except `/health`, the [unsubscribe pages](#unsubscribe-links), and the
+docs requires `Authorization: Bearer TOKEN`.
 
 | Endpoint | Scope | Purpose |
 | --- | --- | --- |
@@ -128,6 +129,8 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /suppressions` | `notifications:read` | Suppressed addresses, newest first, with optional `limit` and `offset` |
 | `POST /suppressions` | `notifications:write` | Suppress the JSON `address` by hand; returns 201 and the suppression |
 | `DELETE /suppressions/{id}` | `notifications:write` | Remove a suppression and return it |
+| `GET /unsubscribe/{token}` | none; the link is signed | HTML page asking the requester to confirm |
+| `POST /unsubscribe/{token}` | none; the link is signed | Suppress the requester's address (RFC 8058 one-click) |
 | `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `limit`, and `offset` |
 
 ```sh
@@ -251,6 +254,7 @@ limit:
 | `TICKETS_SMTP_PORT` | `send-notifications` | Defaults to 587, 465, or 25 to match the security mode |
 | `TICKETS_SMTP_USERNAME`, `TICKETS_SMTP_PASSWORD` | `send-notifications` | Optional login; set both or neither |
 | `TICKETS_SMTP_TIMEOUT` | `send-notifications` | Seconds to wait for the server, default 10 |
+| `TICKETS_UNSUBSCRIBE_SECRET` | API | At least 32 characters that sign [unsubscribe links](#unsubscribe-links); without it, every link is refused |
 
 ## Email notifications
 
@@ -348,6 +352,30 @@ curl -X POST http://127.0.0.1:8000/notifications/retry \
 Messages are plain text with `Auto-Submitted: auto-generated` and a `Message-ID` that
 stays the same on every attempt at one notification.
 
+### Unsubscribe links
+
+A requester can stop notifications themselves from a link, without asking the support
+team and without an API token. `/unsubscribe/{token}` names a ticket and carries an
+HMAC-SHA256 of the ticket ID and its requester's address, keyed with
+`TICKETS_UNSUBSCRIBE_SECRET`:
+
+- `GET` shows a page with an **Unsubscribe** button and changes nothing, so link
+  scanners and mail clients that open links in advance cannot unsubscribe anyone.
+- `POST` suppresses the address with reason `unsubscribed`, the same suppression a
+  permanent refusal creates, and works with any body, as RFC 8058 one-click requests
+  from mail clients send `List-Unsubscribe=One-Click`. Repeating it changes nothing.
+- A malformed, forged, or outdated link, or any link when no secret is set, gets the
+  same 404 page, so a link reveals nothing about which tickets exist.
+
+Nothing is stored per link. The API recomputes the signature from the ticket, so a
+link works as long as the ticket exists and the secret is unchanged, and the address
+never appears in the URL or on the page. Pages are sent with `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer`, and a restrictive Content Security Policy, because the
+URL is the credential. Requests to these pages are not written to the audit log, which
+records only token requests; the suppression records the ticket the link came from.
+Generate a secret with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+Changing it invalidates every link already sent.
+
 ## Docker
 
 ```sh
@@ -373,6 +401,7 @@ ticket_backend/
   cli.py                    argument parsing, text and JSON output, exit codes
   api.py                    FastAPI app, request and response models, token check
   api_audit.py              middleware that records each authenticated request
+  api_unsubscribe.py        unsubscribe pages that need no token
   audit.py                  audit log storage, listing, and pruning
   tickets.py                tickets, status history, comments, statistics
   submissions.py            idempotency keys, scoped to each token, and their pruning
@@ -380,6 +409,7 @@ ticket_backend/
   ratelimit.py              per-token request limits kept in memory
   notifications.py          outbox queries, delivery, and retries
   suppressions.py           addresses notifications are not sent to
+  unsubscribe.py            signing and checking unsubscribe links
   mailer.py                 SMTP settings and sender
   validation.py             input checks shared by the storage modules
   database.py, schema.sql   connections and schema upgrades

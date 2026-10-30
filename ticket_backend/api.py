@@ -1,4 +1,4 @@
-"""The HTTP API. Run it with `uvicorn ticket_backend.api:app`; every route except /health needs a bearer token.
+"""The HTTP API. Run it with `uvicorn ticket_backend.api:app`; routes other than /health and /unsubscribe need a token.
 
 Each route also needs one scope on that token, and requester emails, including notification recipients, are shown
 only to tokens with emails:read. Each token is limited to a number of requests per minute, and every request made
@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ticket_backend import __version__
 from ticket_backend.api_audit import record_requests
+from ticket_backend.api_unsubscribe import unsubscribe_routes
 from ticket_backend.audit import list_audit
 from ticket_backend.database import DEFAULT_DATABASE
 from ticket_backend.notifications import (
@@ -35,6 +36,7 @@ from ticket_backend.tickets import (
     list_tickets, set_status, statistics, ticket_history,
 )
 from ticket_backend.tokens import token_access
+from ticket_backend.unsubscribe import require_secret, secret_from_environment
 
 
 Status = Literal["open", "in_progress", "closed"]
@@ -151,15 +153,22 @@ class RetryInput(BaseModel):
     )
 
 
-def create_app(database: Path | None = None, *, rate_limit: int | None = None) -> FastAPI:
+def create_app(
+    database: Path | None = None, *, rate_limit: int | None = None, unsubscribe_secret: str | None = None,
+) -> FastAPI:
     """Build the API for one database, defaulting to TICKETS_DATABASE or the project's tickets.db.
 
     rate_limit is the requests per minute allowed to a token without its own limit, defaulting to TICKETS_RATE_LIMIT
-    or 120; 0 turns that default off.
+    or 120; 0 turns that default off. unsubscribe_secret verifies unsubscribe links, defaulting to
+    TICKETS_UNSUBSCRIBE_SECRET; without one, every unsubscribe link is refused.
     """
     database = Path(database if database is not None else os.environ.get("TICKETS_DATABASE", DEFAULT_DATABASE))
     default_limit = rate_limit_from_environment() if rate_limit is None else require_rate_limit(rate_limit)
     limiter = RateLimiter()
+    if unsubscribe_secret is None:
+        unsubscribe_secret = secret_from_environment()
+    else:
+        unsubscribe_secret = require_secret(unsubscribe_secret)
     app = FastAPI(title="Ticket Backend", version=__version__)
 
     @app.exception_handler(TicketNotFoundError)
@@ -194,6 +203,7 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
     app.add_exception_handler(OSError, unavailable_storage)
 
     record_requests(app, database)
+    unsubscribe_routes(app, database, unsubscribe_secret)
 
     def caller(
         request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
