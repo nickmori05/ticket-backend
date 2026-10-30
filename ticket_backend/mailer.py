@@ -19,7 +19,15 @@ MESSAGE_POLICY = policy.SMTP.clone(cte_type="7bit")
 
 
 class DeliveryError(Exception):
-    """The SMTP server could not be reached, rejected the session, or refused a message."""
+    """The SMTP server could not be reached, rejected the session, or refused a message.
+
+    permanent is True when sending the same message again cannot succeed, because the server refused its recipient
+    with a permanent (5xx) reply such as 550 No such user.
+    """
+
+    def __init__(self, message: str, *, permanent: bool = False):
+        super().__init__(message)
+        self.permanent = permanent
 
 
 def _loopback(host: str) -> bool:
@@ -121,6 +129,15 @@ def _describe(error: Exception) -> str:
     return str(error) or type(error).__name__
 
 
+def _permanent(error: Exception) -> bool:
+    # Only a refused recipient is specific to one message; a refused sender or message body affects every message,
+    # so it is retried like an outage. RFC 5321 says to treat 552 on RCPT as temporary, since servers use it for full
+    # mailboxes.
+    if not isinstance(error, smtplib.SMTPRecipientsRefused) or not error.recipients:
+        return False
+    return all(500 <= code < 600 and code != 552 for code, _reply in error.recipients.values())
+
+
 class SmtpSender:
     """Send outbox notifications over one SMTP connection, reconnecting after a failed message.
 
@@ -179,4 +196,4 @@ class SmtpSender:
         except (smtplib.SMTPException, OSError) as error:
             # The session may be mid-transaction or gone, so start the next message on a fresh connection.
             self.close()
-            raise DeliveryError(_describe(error)) from error
+            raise DeliveryError(_describe(error), permanent=_permanent(error)) from error

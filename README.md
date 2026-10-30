@@ -73,6 +73,8 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
 | `retry-notifications [ID ...]` | Requeue failed notifications |
 | `prune-notifications --older-than DAYS` | Delete notifications sent more than 1 to 3650 days ago |
+| `suppressions list [--limit N] [--offset N]` | List addresses notifications are not sent to, newest first |
+| `suppressions add ADDRESS` / `suppressions remove ADDRESS` | Stop / resume notifications to an address |
 | `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
 | `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
@@ -93,7 +95,7 @@ then needs both `--title` and `--message`.
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Success |
-| `1` | Ticket, token, or notification not found |
+| `1` | Ticket, token, notification, or suppression not found |
 | `2` | Invalid input or configuration, or a storage error |
 | `3` | Idempotency key already used for different content |
 | `4` | SMTP server unreachable, or it rejected STARTTLS or the login |
@@ -123,6 +125,9 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /notifications` | `notifications:read` | Outbox, oldest first, with optional `status`, `ticket_id`, `limit`, and `offset` |
 | `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
 | `POST /notifications/retry` | `notifications:write` | Requeue failed notifications from JSON `ids`, or all failed ones without a body |
+| `GET /suppressions` | `notifications:read` | Suppressed addresses, newest first, with optional `limit` and `offset` |
+| `POST /suppressions` | `notifications:write` | Suppress the JSON `address` by hand; returns 201 and the suppression |
+| `DELETE /suppressions/{id}` | `notifications:write` | Remove a suppression and return it |
 | `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `limit`, and `offset` |
 
 ```sh
@@ -154,7 +159,7 @@ name of the token that made them.
 | `tickets:write` | Creating tickets, changing status, and adding comments |
 | `emails:read` | Seeing requester emails; without it, `email` and `recipient` are always `null` in responses |
 | `notifications:read` | Reading the outbox, including subjects and bodies, which repeat ticket titles, messages, and notes |
-| `notifications:write` | Requeueing failed notifications |
+| `notifications:write` | Requeueing failed notifications and managing suppressed addresses |
 | `audit:read` | Reading the audit log of every token's requests |
 
 A token created without `--scope` gets every scope. Grant only what a client needs,
@@ -273,14 +278,46 @@ recorded on that notification, and the next message uses a fresh connection.
 
 A failed attempt is retried after `--retry-delay` seconds (default 60), doubling each
 time up to a day. After `--max-attempts` (default 5) the notification is marked
-`failed`. Once the cause is fixed, `retry-notifications` moves every failed
-notification, or only the IDs given, back to `pending` with a fresh attempt budget.
+`failed`. A recipient the server refuses with a permanent (5xx) reply, such as
+`550 No such user`, is marked `failed` after that one attempt, since sending the same
+message again cannot succeed. Temporary (4xx) refusals, and `552`, which servers also
+use for full mailboxes, are retried as usual. A refused sender or message body affects
+every message, so it is retried like an outage. Once the cause is fixed,
+`retry-notifications` moves every failed notification, or only the IDs given, back to
+`pending` with a fresh attempt budget.
 Naming a missing notification exits with code 1, and naming one that is not `failed`
 exits with code 2, without changing anything.
 
 ```sh
 python3 tickets.py outbox --status failed
 python3 tickets.py retry-notifications 4 7
+```
+
+A permanently refused address is also **suppressed**: later notifications to it, and
+any already queued, are marked `failed` with `Not sent: ... is suppressed` instead of
+being sent, without using an attempt. Addresses match without regard to case. Use
+`suppressions add` to stop notifications to an address by hand, for example when a
+requester asks, and `suppressions remove` once an address works again:
+
+```sh
+python3 tickets.py suppressions list
+python3 tickets.py suppressions remove pat@example.com
+python3 tickets.py retry-notifications
+```
+
+Removing a suppression does not resend anything by itself. `retry-notifications`
+skips notifications to suppressed addresses, and naming one exits with code 2, so
+remove the suppression first. An address keeps its first suppression, so suppressing a
+refused address by hand does not change its recorded reason or server reply.
+
+Over HTTP, `GET`, `POST`, and `DELETE /suppressions` do the same with the notification
+scopes. Suppressions are removed by ID rather than by address, so no address appears
+in a URL or the audit log. As in the outbox, a token without `emails:read` sees
+`address` as `null` and the address as `[hidden]` in the server's reply.
+
+```sh
+curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/suppressions
+curl -X DELETE -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/suppressions/3
 ```
 
 Sent notifications are kept until `prune-notifications --older-than DAYS` deletes
@@ -342,6 +379,7 @@ ticket_backend/
   tokens.py                 token creation, revocation, and authentication
   ratelimit.py              per-token request limits kept in memory
   notifications.py          outbox queries, delivery, and retries
+  suppressions.py           addresses notifications are not sent to
   mailer.py                 SMTP settings and sender
   validation.py             input checks shared by the storage modules
   database.py, schema.sql   connections and schema upgrades
@@ -451,7 +489,8 @@ notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the CLI prunes an old key so the API's next retry creates a new ticket,
 that the image runs as a
-non-root user, and that `send-notifications` delivers through the image. It uses a
+non-root user, and that `send-notifications` delivers through the image, skipping an
+address suppressed over HTTP until the CLI removes the suppression. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
 Actions runs ruff, the unit tests on Python 3.10, 3.11, and 3.14, and the Docker smoke
 test.
@@ -481,6 +520,7 @@ test.
 - Requester emails are stored in plain text in the database, and hidden only from API
   tokens without `emails:read`. An address an SMTP server quotes in a different form
   than the recipient, such as an encoded one, is not hidden from `last_error`.
-- Notifications have no unsubscribe, bounce handling, or HTML version, and
-  `send-notifications` and `prune-notifications` need an external scheduler. A
-  permanently refused recipient is retried like any other failure.
+- Notifications have no unsubscribe or HTML version, and `send-notifications` and
+  `prune-notifications` need an external scheduler. Bounces that arrive later by email,
+  after the server accepted the message, are not read, so only refusals during the SMTP
+  session suppress an address.

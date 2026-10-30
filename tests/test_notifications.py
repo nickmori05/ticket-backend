@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from ticket_backend.database import connect
+from ticket_backend.mailer import DeliveryError
 from ticket_backend.notifications import deliver_notifications, list_notifications
 from ticket_backend.tickets import IdempotencyConflictError, create_ticket, get_ticket, set_status, ticket_history
 
@@ -176,6 +177,31 @@ class NotificationDeliveryTests(unittest.TestCase):
         self.assertEqual([outcome["failed"] for outcome in outcomes], [0, 0, 1, 0])
         row = list_notifications(self.database)[0]
         self.assertEqual((row["status"], row["attempts"]), ("failed", 3))
+
+    def test_permanent_failures_are_not_retried(self):
+        create_ticket("Second", "Body", self.database, email="sam@example.com")
+
+        def refuse(notification):
+            raise DeliveryError(f"Recipient {notification['recipient']} refused: 550 No such user",
+                                permanent=notification["recipient"] == "pat@example.com")
+        self.assertEqual(deliver_notifications(refuse, self.database, max_attempts=5, retry_delay=0),
+                         {"sent": 0, "retrying": 1, "failed": 1})
+        rows = list_notifications(self.database)
+        self.assertEqual([(row["status"], row["attempts"]) for row in rows], [("failed", 1), ("pending", 1)])
+        self.assertEqual(rows[0]["last_error"], "Recipient pat@example.com refused: 550 No such user")
+        self.assertEqual(deliver_notifications(self.send, self.database, retry_delay=0),
+                         {"sent": 1, "retrying": 0, "failed": 0})
+        self.assertEqual([row["recipient"] for row in self.sent], ["sam@example.com"])
+
+    def test_only_a_true_permanent_attribute_skips_the_retries(self):
+        class Flagged(Exception):
+            permanent = "yes"
+        for error in (DeliveryError("Server busy"), Flagged("Odd sender")):
+            with self.subTest(error=error):
+                def fail(notification, error=error):
+                    raise error
+                self.assertEqual(deliver_notifications(fail, self.database, retry_delay=0)["retrying"], 1)
+        self.assertEqual(list_notifications(self.database)[0]["status"], "pending")
 
     def test_errors_without_a_message_record_the_exception_type(self):
         def fail(notification):

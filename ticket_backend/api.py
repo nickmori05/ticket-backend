@@ -27,6 +27,9 @@ from ticket_backend.notifications import (
     NotificationNotFoundError, NotificationStateError, get_notification, list_notifications, retry_notifications,
 )
 from ticket_backend.ratelimit import RateLimiter, rate_limit_from_environment, require_rate_limit
+from ticket_backend.suppressions import (
+    SuppressionNotFoundError, list_suppressions, remove_suppression, suppress_address,
+)
 from ticket_backend.tickets import (
     IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
     list_tickets, set_status, statistics, ticket_history,
@@ -110,6 +113,24 @@ class NotificationOutput(BaseModel):
     created_at: str
 
 
+SuppressionId = Annotated[int, PathParameter(gt=0)]
+
+
+class SuppressionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    address: str = Field(min_length=1, max_length=254, strict=True)
+
+
+class SuppressionOutput(BaseModel):
+    id: int
+    address: Annotated[str | None, Field(description="The suppressed address, or null when the token does not have "
+                                                     "the emails:read scope.")]
+    reason: Annotated[str, Field(description="refused after a permanent SMTP refusal, or manual.")]
+    detail: Annotated[str | None, Field(description="The server's reply for a refusal.")]
+    notification_id: Annotated[int | None, Field(description="The notification that was refused.")]
+    created_at: str
+
+
 class AuditOutput(BaseModel):
     id: int
     token: Annotated[str, Field(description="Name of the token that made the request.")]
@@ -147,6 +168,10 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
 
     @app.exception_handler(NotificationNotFoundError)
     async def missing_notification(_request: Request, error: NotificationNotFoundError):
+        return JSONResponse(status_code=404, content={"detail": str(error)})
+
+    @app.exception_handler(SuppressionNotFoundError)
+    async def missing_suppression(_request: Request, error: SuppressionNotFoundError):
         return JSONResponse(status_code=404, content={"detail": str(error)})
 
     @app.exception_handler(NotificationStateError)
@@ -213,6 +238,14 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
         if error is not None:
             error = re.sub(re.escape(notification["recipient"]), "[hidden]", error, flags=re.IGNORECASE)
         return {**notification, "recipient": None, "last_error": error}
+
+    def shown_suppression(suppression: dict, access: dict) -> dict:
+        if "emails:read" in access["scopes"]:
+            return suppression
+        detail = suppression["detail"]
+        if detail is not None:
+            detail = re.sub(re.escape(suppression["address"]), "[hidden]", detail, flags=re.IGNORECASE)
+        return {**suppression, "address": None, "detail": detail}
 
     # Every route except /health requires a token; FastAPI reuses the result within a request.
     protected = APIRouter(dependencies=[Depends(caller)],
@@ -300,6 +333,24 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
     def retry(access: Annotated[dict, Depends(outbox_writer)], payload: RetryInput | None = None):
         ids = payload.ids if payload is not None else None
         return [shown_notification(row, access) for row in retry_notifications(database, ids)]
+
+    @protected.get("/suppressions", response_model=list[SuppressionOutput])
+    def suppressions(
+        access: Annotated[dict, Depends(outbox_reader)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ):
+        return [shown_suppression(row, access) for row in list_suppressions(database, limit, offset=offset)]
+
+    @protected.post("/suppressions", status_code=201, response_model=SuppressionOutput)
+    def suppress(payload: SuppressionInput, access: Annotated[dict, Depends(outbox_writer)]):
+        return shown_suppression(suppress_address(payload.address, database), access)
+
+    # Suppressions are removed by ID, so no address appears in a path or in the audit log.
+    @protected.delete("/suppressions/{suppression_id}", response_model=SuppressionOutput,
+                      responses={404: {"description": "No suppression has this ID"}})
+    def unsuppress(suppression_id: SuppressionId, access: Annotated[dict, Depends(outbox_writer)]):
+        return shown_suppression(remove_suppression(database, suppression_id=suppression_id), access)
 
     @protected.get("/audit", response_model=list[AuditOutput], dependencies=[Depends(auditor)])
     def audit_log(

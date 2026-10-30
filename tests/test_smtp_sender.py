@@ -4,13 +4,15 @@ import io
 import json
 import os
 from pathlib import Path
+import smtplib
 import socket
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ticket_backend import cli
 from ticket_backend.notifications import deliver_notifications, list_notifications
+from ticket_backend.suppressions import list_suppressions
 from ticket_backend.tickets import create_ticket, set_status
 from ticket_backend.mailer import DeliveryError, SmtpSender, SmtpSettings, build_message, settings_from_environment
 from smtp_stub import SmtpStub
@@ -126,14 +128,55 @@ class SmtpDeliveryTests(unittest.TestCase):
         self.assertEqual(messages[1][1].get_content(), "Ticket #1 changed from open to closed.\n\nFixed the form\n")
         self.assertEqual({row["status"] for row in list_notifications(self.database)}, {"sent"})
 
-    def test_a_refused_recipient_is_retried_later_without_blocking_others(self):
-        self.queue("gone@example.com", "pat@example.com")
-        with SmtpStub(refuse={"gone@example.com"}) as stub, SmtpSender(self.settings(stub)) as sender:
+    def test_a_deferred_recipient_is_retried_later_without_blocking_others(self):
+        self.queue("busy@example.com", "pat@example.com")
+        with SmtpStub(defer={"busy@example.com"}) as stub, SmtpSender(self.settings(stub)) as sender:
             self.assertEqual(deliver_notifications(sender, self.database), {"sent": 1, "retrying": 1, "failed": 0})
         self.assertEqual([recipients for recipients, _message in stub.parsed()], [["pat@example.com"]])
+        deferred = list_notifications(self.database)[0]
+        self.assertEqual((deferred["status"], deferred["attempts"]), ("pending", 1))
+        self.assertEqual(deferred["last_error"],
+                         "Recipient busy@example.com refused: 450 4.2.1 Mailbox busy, try again later")
+
+    def test_a_permanently_refused_recipient_fails_without_using_its_retries(self):
+        self.queue("gone@example.com", "pat@example.com")
+        with SmtpStub(refuse={"gone@example.com"}) as stub, SmtpSender(self.settings(stub)) as sender:
+            self.assertEqual(deliver_notifications(sender, self.database, max_attempts=5),
+                             {"sent": 1, "retrying": 0, "failed": 1})
+        self.assertEqual([recipients for recipients, _message in stub.parsed()], [["pat@example.com"]])
         refused = list_notifications(self.database)[0]
-        self.assertEqual((refused["status"], refused["attempts"]), ("pending", 1))
+        self.assertEqual((refused["status"], refused["attempts"]), ("failed", 1))
         self.assertEqual(refused["last_error"], "Recipient gone@example.com refused: 550 5.1.1 No such user")
+        self.assertEqual([(row["address"], row["reason"]) for row in list_suppressions(self.database)],
+                         [("gone@example.com", "refused")])
+
+    def test_only_permanent_recipient_replies_are_treated_as_permanent(self):
+        def refusal(error):
+            sender = SmtpSender(SmtpSettings("127.0.0.1", "support@example.com", port=closed_port(),
+                                             security="none", timeout=1))
+            sender._connection = Mock(send_message=Mock(side_effect=error))
+            with self.assertRaises(DeliveryError) as raised:
+                sender({"id": 1, "recipient": "pat@example.com", "subject": "S", "body": "B",
+                        "created_at": "2026-10-19 09:30:00"})
+            self.assertIsNone(sender._connection, "A failed message must close the connection")
+            return raised.exception.permanent
+
+        refused = smtplib.SMTPRecipientsRefused
+        for error, permanent in (
+            (refused({"pat@example.com": (550, b"5.1.1 No such user")}), True),
+            (refused({"pat@example.com": (553, b"5.1.3 Bad address syntax")}), True),
+            # RFC 5321 asks clients to treat 552 on RCPT as 452, because servers send it for full mailboxes.
+            (refused({"pat@example.com": (552, b"5.2.2 Mailbox full")}), False),
+            (refused({"pat@example.com": (451, b"4.3.0 Try later")}), False),
+            (refused({}), False),
+            # A refused sender or message affects every message, so it is retried like an outage.
+            (smtplib.SMTPSenderRefused(550, b"5.7.1 Sender rejected", "support@example.com"), False),
+            (smtplib.SMTPDataError(554, b"5.6.0 Message rejected"), False),
+            (smtplib.SMTPServerDisconnected("Connection unexpectedly closed"), False),
+            (ConnectionResetError("reset"), False),
+        ):
+            with self.subTest(error=error):
+                self.assertIs(refusal(error), permanent)
 
     def test_a_dropped_connection_is_recorded_and_the_next_message_reconnects(self):
         self.queue("drop@example.com", "pat@example.com")
@@ -162,6 +205,14 @@ class SmtpDeliveryTests(unittest.TestCase):
         self.assertEqual((code, json.loads(output)), (0, {"sent": 0, "retrying": 0, "failed": 0}))
         self.assertEqual(stub.connections, 1, "A run with nothing due must not connect")
         self.assertEqual(stub.parsed()[0][1]["From"], "support@example.com")
+
+    def test_send_command_counts_a_permanent_refusal_as_failed(self):
+        self.queue("gone@example.com")
+        with SmtpStub(refuse={"gone@example.com"}) as stub:
+            code, output, errors = self.run_send(stub.port, "send-notifications")
+        self.assertEqual((code, output, errors), (0, "Sent 0, retrying 0, failed 1.\n", ""))
+        code, output, _errors = self.run_send(stub.port, "send-notifications")
+        self.assertEqual((code, output), (0, "Sent 0, retrying 0, failed 0.\n"), "A failed notification is not due")
 
     def test_send_command_respects_the_limit(self):
         self.queue("pat@example.com", "sam@example.com")
