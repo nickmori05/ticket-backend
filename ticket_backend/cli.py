@@ -11,8 +11,9 @@ from ticket_backend.database import DEFAULT_DATABASE
 from ticket_backend.mailer import DeliveryError, SmtpSender, settings_from_environment
 from ticket_backend.notifications import (
     NOTIFICATION_STATUSES, NotificationNotFoundError, count_due_notifications, deliver_notifications,
-    list_notifications, retry_notifications,
+    list_notifications, prune_notifications, retry_notifications,
 )
+from ticket_backend.submissions import prune_submission_keys
 from ticket_backend.tickets import (
     STATUSES, IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
     list_tickets, set_status, statistics, ticket_history,
@@ -65,6 +66,8 @@ def parser() -> argparse.ArgumentParser:
     send.add_argument("--retry-delay", type=int, default=60, help="Seconds before the first retry; doubles each time")
     retry = commands.add_parser("retry-notifications", help="Requeue failed notifications with a fresh attempt budget")
     retry.add_argument("ids", type=int, nargs="*", metavar="ID", help="Notifications to requeue; default all failed")
+    prune = commands.add_parser("prune-notifications", help="Delete notifications sent more than a number of days ago")
+    prune.add_argument("--older-than", type=int, required=True, metavar="DAYS")
     token = commands.add_parser("token", help="Manage API tokens")
     actions = token.add_subparsers(dest="action", required=True)
     token_create = actions.add_parser("create", help="Create a token; it is shown only once")
@@ -94,6 +97,10 @@ def parser() -> argparse.ArgumentParser:
     audit_list.add_argument("--offset", type=int, default=0)
     audit_prune = audit_actions.add_parser("prune", help="Delete recorded requests older than a number of days")
     audit_prune.add_argument("--older-than", type=int, required=True, metavar="DAYS")
+    keys = commands.add_parser("keys", help="Manage saved idempotency keys")
+    key_actions = keys.add_subparsers(dest="action", required=True)
+    keys_prune = key_actions.add_parser("prune", help="Delete idempotency keys saved more than a number of days ago")
+    keys_prune.add_argument("--older-than", type=int, required=True, metavar="DAYS")
     return root
 
 
@@ -141,6 +148,8 @@ def display(command: str, result, action: str | None = None) -> None:
             print("No failed notifications to retry.")
         for row in result:
             print(f"#{row['id']} requeued for {row['recipient']}: {row['subject']}")
+    elif command == "prune-notifications":
+        print(f"Deleted {result['deleted']} sent notification" + ("." if result["deleted"] == 1 else "s."))
     elif command == "stats":
         print(f"Total: {result['total']}")
         for status, count in result["by_status"].items():
@@ -153,6 +162,8 @@ def display(command: str, result, action: str | None = None) -> None:
             print(f"{row['created_at']} UTC, {row['token']}: {row['method']} {row['path']} -> {row['status']}{ticket}")
     elif command == "audit":
         print(f"Deleted {result['deleted']} recorded API request" + ("." if result["deleted"] == 1 else "s."))
+    elif command == "keys":
+        print(f"Deleted {result['deleted']} idempotency key" + ("." if result["deleted"] == 1 else "s."))
     elif action in ("create", "rotate"):
         print(f"{'New token' if action == 'rotate' else 'Token'} for {result['name']}: {result['token']}")
         print(f"Scopes: {' '.join(result['scopes'])}")
@@ -241,10 +252,14 @@ def main(argv: list[str] | None = None) -> int:
             result = send_notifications(args)
         elif args.command == "retry-notifications":
             result = retry_notifications(args.database, args.ids or None)
+        elif args.command == "prune-notifications":
+            result = prune_notifications(args.older_than, args.database)
         elif args.command == "audit" and args.action == "list":
             result = list_audit(args.database, args.limit, offset=args.offset, token=args.token, ticket_id=args.ticket)
         elif args.command == "audit":
             result = prune_audit(args.older_than, args.database)
+        elif args.command == "keys":
+            result = prune_submission_keys(args.older_than, args.database)
         elif args.action == "create":
             result = create_token(args.name, args.database, scopes=args.scopes, expires_in_days=args.expires_in,
                                   rate_limit=args.rate_limit)
