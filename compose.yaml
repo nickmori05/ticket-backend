@@ -15,6 +15,7 @@ services:
     environment:
       TICKETS_DATABASE: /data/tickets.db
       TICKETS_RATE_LIMIT: ${TICKETS_RATE_LIMIT:-120}
+      TICKETS_UNSUBSCRIBE_SECRET: ${TICKETS_UNSUBSCRIBE_SECRET:-}
     ports:
       - "127.0.0.1:${TICKETS_PORT:-8000}:8000"
     volumes:

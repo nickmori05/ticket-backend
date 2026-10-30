@@ -5,6 +5,7 @@ import subprocess
 import sys
 import uuid
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -18,7 +19,8 @@ with SmtpStub() as stub:
     with contextlib.redirect_stdout(output):
         code = cli.main(["--database", "/data/tickets.db", "--json", "send-notifications"])
 print(json.dumps({"code": code, "counts": json.loads(output.getvalue()),
-                  "recipients": [recipients for _sender, recipients, _data in stub.messages]}))
+                  "recipients": [recipients for _sender, recipients, _data in stub.messages],
+                  "unsubscribe": [message["List-Unsubscribe"] for _recipients, message in stub.parsed()]}))
 """
 # Make the smoke token's saved keys two days old, as if they had been kept that long.
 AGE_TOKEN_KEYS = """
@@ -32,7 +34,8 @@ with sqlite3.connect("/data/tickets.db") as connection:
 def main() -> int:
     project = f"ticket-smoke-{uuid.uuid4().hex[:12]}"
     compose = ["docker", "compose", "--project-name", project]
-    environment = {**os.environ, "TICKETS_PORT": "0"}
+    unsubscribe_secret = uuid.uuid4().hex * 2
+    environment = {**os.environ, "TICKETS_PORT": "0", "TICKETS_UNSUBSCRIBE_SECRET": unsubscribe_secret}
 
     def run(*arguments, input=None, check=True):
         result = subprocess.run(
@@ -153,7 +156,8 @@ def main() -> int:
         delivered = json.loads(run("run", "--rm", "-T", *smtp, "--entrypoint", "python", "tickets", "-",
                                    input=driver).strip().splitlines()[-1])
         assert delivered == {"code": 0, "counts": {"sent": 2, "retrying": 0, "failed": 0},
-                             "recipients": [[payload["email"]]] * 2}, f"SMTP delivery failed: {delivered}"
+                             "recipients": [[payload["email"]]] * 2, "unsubscribe": [None] * 2}, \
+            f"SMTP delivery failed: {delivered}"
         assert {row["status"] for row in command("outbox")} == {"sent"}, "CLI did not see sent notifications"
         assert command("retry-notifications") == [], "Nothing should need retrying"
         status, outbox = request(api_address(), f"/notifications?ticket_id={http_id}")
@@ -178,7 +182,8 @@ def main() -> int:
         request(api_address(), f"/tickets/{http_id}/status", "PATCH", {"status": "in_progress"})
         skipped = json.loads(run("run", "--rm", "-T", *smtp, "--entrypoint", "python", "tickets", "-",
                                  input=driver).strip().splitlines()[-1])
-        assert skipped == {"code": 0, "counts": {"sent": 0, "retrying": 0, "failed": 1}, "recipients": []}, \
+        assert skipped == {"code": 0, "counts": {"sent": 0, "retrying": 0, "failed": 1}, "recipients": [],
+                           "unsubscribe": []}, \
             f"Sender did not skip the suppressed address: {skipped}"
         assert command("suppressions", "remove", payload["email"])["id"] == suppressed["id"]
         assert request(api_address(), "/suppressions") == (200, []), "API still listed the removed suppression"
@@ -187,6 +192,27 @@ def main() -> int:
         resent = json.loads(run("run", "--rm", "-T", *smtp, "--entrypoint", "python", "tickets", "-",
                                 input=driver).strip().splitlines()[-1])
         assert resent["counts"]["sent"] == 1, f"Notification was not sent after the suppression was removed: {resent}"
+        # With the API's secret, the image's sender links each message to an unsubscribe page that needs no token.
+        request(api_address(), f"/tickets/{http_id}/status", "PATCH", {"status": "closed"})
+        linked = json.loads(run("run", "--rm", "-T", *smtp, "-e", "TICKETS_UNSUBSCRIBE_URL=http://localhost:8000",
+                                "-e", f"TICKETS_UNSUBSCRIBE_SECRET={unsubscribe_secret}", "--entrypoint", "python",
+                                "tickets", "-", input=driver).strip().splitlines()[-1])
+        [link] = linked["unsubscribe"]
+        assert linked["counts"]["sent"] == 1 and link.startswith("<http://localhost:8000/unsubscribe/"), \
+            f"Sender did not add an unsubscribe link: {linked}"
+        page = api_address() + urlsplit(link.strip("<>")).path
+        with urlopen(page, timeout=5) as response:
+            assert response.status == 200 and b'method="post"' in response.read(), "Unsubscribe page did not load"
+        assert command("suppressions", "list") == [], "Opening the unsubscribe page unsubscribed the requester"
+        with urlopen(Request(page, data=b"List-Unsubscribe=One-Click", method="POST"), timeout=5) as response:
+            assert response.status == 200, "One-click unsubscribe failed"
+        assert [(row["address"], row["reason"]) for row in command("suppressions", "list")] == \
+            [(payload["email"], "unsubscribed")], "CLI did not see the requester's unsubscribe"
+        try:
+            urlopen(Request(page[:-1] + ("A" if page[-1] != "A" else "B"), data=b"", method="POST"), timeout=5)
+            raise AssertionError("API accepted a forged unsubscribe link")
+        except HTTPError as error:
+            assert error.code == 404, f"Expected 404 for a forged unsubscribe link, got {error.code}"
         # The terminal has its own keys, so the token's key with other content is a new ticket, not a conflict.
         local = command("create", "--title", "CLI ticket", "--message", "Same key as the token",
                         "--idempotency-key", key)

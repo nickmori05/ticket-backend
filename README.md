@@ -411,6 +411,18 @@ between them. The API is published on loopback only, and the image runs as a
 non-root user. `docker compose down` keeps the volume; `docker compose down --volumes`
 deletes the Docker database.
 
+For [unsubscribe links](#unsubscribe-links), start the API with
+`TICKETS_UNSUBSCRIBE_SECRET` set, which Compose passes to the `api` service, and give
+`send-notifications` the same secret and the API's public address:
+
+```sh
+export TICKETS_UNSUBSCRIBE_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+docker compose up -d api
+docker compose run --rm -e TICKETS_SMTP_HOST=smtp.example.com \
+  -e TICKETS_SMTP_FROM=support@example.com -e TICKETS_UNSUBSCRIBE_SECRET \
+  -e TICKETS_UNSUBSCRIBE_URL=https://support.example.com tickets send-notifications
+```
+
 ## Design
 
 ```text
@@ -538,7 +550,9 @@ keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the CLI prunes an old key so the API's next retry creates a new ticket,
 that the image runs as a
 non-root user, and that `send-notifications` delivers through the image, skipping an
-address suppressed over HTTP until the CLI removes the suppression. It uses a
+address suppressed over HTTP until the CLI removes the suppression, and that the
+link in a sent message shows a page without unsubscribing and then unsubscribes the
+requester with one POST and no token, while a forged link gets 404. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
 Actions runs ruff, the unit tests on Python 3.10, 3.11, and 3.14, and the Docker smoke
 test.
