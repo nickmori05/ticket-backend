@@ -7,8 +7,10 @@ import threading
 
 
 class SmtpStub:
-    def __init__(self, *, refuse=(), disconnect=(), credentials=None):
+    def __init__(self, *, refuse=(), defer=(), disconnect=(), credentials=None):
+        # refuse rejects a recipient permanently (550); defer rejects it temporarily (450).
         self.refuse = set(refuse)
+        self.defer = set(defer)
         self.disconnect = set(disconnect)
         self.credentials = credentials
         self.messages = []
@@ -66,6 +68,8 @@ class SmtpStub:
                 recipient = command.split(":", 1)[1].strip().strip("<>")
                 if recipient in self.refuse:
                     reply("550 5.1.1 No such user")
+                elif recipient in self.defer:
+                    reply("450 4.2.1 Mailbox busy, try again later")
                 else:
                     recipients.append(recipient)
                     reply("250 OK")

@@ -273,8 +273,13 @@ recorded on that notification, and the next message uses a fresh connection.
 
 A failed attempt is retried after `--retry-delay` seconds (default 60), doubling each
 time up to a day. After `--max-attempts` (default 5) the notification is marked
-`failed`. Once the cause is fixed, `retry-notifications` moves every failed
-notification, or only the IDs given, back to `pending` with a fresh attempt budget.
+`failed`. A recipient the server refuses with a permanent (5xx) reply, such as
+`550 No such user`, is marked `failed` after that one attempt, since sending the same
+message again cannot succeed. Temporary (4xx) refusals, and `552`, which servers also
+use for full mailboxes, are retried as usual. A refused sender or message body affects
+every message, so it is retried like an outage. Once the cause is fixed,
+`retry-notifications` moves every failed notification, or only the IDs given, back to
+`pending` with a fresh attempt budget.
 Naming a missing notification exits with code 1, and naming one that is not `failed`
 exits with code 2, without changing anything.
 
@@ -481,6 +486,6 @@ test.
 - Requester emails are stored in plain text in the database, and hidden only from API
   tokens without `emails:read`. An address an SMTP server quotes in a different form
   than the recipient, such as an encoded one, is not hidden from `last_error`.
-- Notifications have no unsubscribe, bounce handling, or HTML version, and
-  `send-notifications` and `prune-notifications` need an external scheduler. A
-  permanently refused recipient is retried like any other failure.
+- Notifications have no unsubscribe or HTML version, and `send-notifications` and
+  `prune-notifications` need an external scheduler. Bounces that arrive later by email,
+  after the server accepted the message, are not read.

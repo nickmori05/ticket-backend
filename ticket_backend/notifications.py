@@ -144,7 +144,8 @@ def deliver_notifications(
     """Pass each due notification to send(), oldest first, and record the outcome.
 
     send() reports failure by raising. A failed attempt is retried after retry_delay seconds, doubling each
-    time up to a day, until max_attempts is reached and the notification is marked failed.
+    time up to a day, until max_attempts is reached and the notification is marked failed. An exception with a true
+    permanent attribute, such as a recipient the server refused with a 5xx reply, marks it failed at once.
     """
     if not callable(send):
         raise ValueError("Sender must be callable.")
@@ -180,7 +181,8 @@ def deliver_notifications(
             try:
                 send(notification)
             except Exception as error:
-                outcome = "failed" if notification["attempts"] >= max_attempts else "retrying"
+                permanent = getattr(error, "permanent", False) is True
+                outcome = "failed" if permanent or notification["attempts"] >= max_attempts else "retrying"
                 with connection:
                     connection.execute(
                         "UPDATE ticket_notifications SET status = ?, last_error = ? WHERE id = ?",
