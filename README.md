@@ -125,6 +125,9 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /notifications` | `notifications:read` | Outbox, oldest first, with optional `status`, `ticket_id`, `limit`, and `offset` |
 | `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
 | `POST /notifications/retry` | `notifications:write` | Requeue failed notifications from JSON `ids`, or all failed ones without a body |
+| `GET /suppressions` | `notifications:read` | Suppressed addresses, newest first, with optional `limit` and `offset` |
+| `POST /suppressions` | `notifications:write` | Suppress the JSON `address` by hand; returns 201 and the suppression |
+| `DELETE /suppressions/{id}` | `notifications:write` | Remove a suppression and return it |
 | `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `limit`, and `offset` |
 
 ```sh
@@ -156,7 +159,7 @@ name of the token that made them.
 | `tickets:write` | Creating tickets, changing status, and adding comments |
 | `emails:read` | Seeing requester emails; without it, `email` and `recipient` are always `null` in responses |
 | `notifications:read` | Reading the outbox, including subjects and bodies, which repeat ticket titles, messages, and notes |
-| `notifications:write` | Requeueing failed notifications |
+| `notifications:write` | Requeueing failed notifications and managing suppressed addresses |
 | `audit:read` | Reading the audit log of every token's requests |
 
 A token created without `--scope` gets every scope. Grant only what a client needs,
@@ -306,6 +309,16 @@ Removing a suppression does not resend anything by itself. `retry-notifications`
 skips notifications to suppressed addresses, and naming one exits with code 2, so
 remove the suppression first. An address keeps its first suppression, so suppressing a
 refused address by hand does not change its recorded reason or server reply.
+
+Over HTTP, `GET`, `POST`, and `DELETE /suppressions` do the same with the notification
+scopes. Suppressions are removed by ID rather than by address, so no address appears
+in a URL or the audit log. As in the outbox, a token without `emails:read` sees
+`address` as `null` and the address as `[hidden]` in the server's reply.
+
+```sh
+curl -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/suppressions
+curl -X DELETE -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/suppressions/3
+```
 
 Sent notifications are kept until `prune-notifications --older-than DAYS` deletes
 those sent more than the given number of days ago. Pending and failed notifications
@@ -476,7 +489,8 @@ notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the CLI prunes an old key so the API's next retry creates a new ticket,
 that the image runs as a
-non-root user, and that `send-notifications` delivers through the image. It uses a
+non-root user, and that `send-notifications` delivers through the image, skipping an
+address suppressed over HTTP until the CLI removes the suppression. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
 Actions runs ruff, the unit tests on Python 3.10, 3.11, and 3.14, and the Docker smoke
 test.

@@ -165,6 +165,28 @@ def main() -> int:
             raise AssertionError("API showed the outbox to a token without notifications:read")
         except HTTPError as error:
             assert error.code == 403, f"Expected 403 for the outbox without its scope, got {error.code}"
+        # A suppression added over HTTP stops the image's sender, and the CLI lifts it so a retry is delivered.
+        status, suppressed = request(api_address(), "/suppressions", "POST", {"address": payload["email"]})
+        assert status == 201 and suppressed["reason"] == "manual", "API did not suppress the address"
+        assert [row["address"] for row in command("suppressions", "list")] == [payload["email"]], \
+            "CLI did not see the API's suppression"
+        try:
+            request(api_address(), "/suppressions", bearer=reader["token"])
+            raise AssertionError("API showed suppressions to a token without notifications:read")
+        except HTTPError as error:
+            assert error.code == 403, f"Expected 403 for suppressions without their scope, got {error.code}"
+        request(api_address(), f"/tickets/{http_id}/status", "PATCH", {"status": "in_progress"})
+        skipped = json.loads(run("run", "--rm", "-T", *smtp, "--entrypoint", "python", "tickets", "-",
+                                 input=driver).strip().splitlines()[-1])
+        assert skipped == {"code": 0, "counts": {"sent": 0, "retrying": 0, "failed": 1}, "recipients": []}, \
+            f"Sender did not skip the suppressed address: {skipped}"
+        assert command("suppressions", "remove", payload["email"])["id"] == suppressed["id"]
+        assert request(api_address(), "/suppressions") == (200, []), "API still listed the removed suppression"
+        status, requeued = request(api_address(), "/notifications/retry", "POST", {})
+        assert status == 200 and [row["status"] for row in requeued] == ["pending"], "Retry skipped the address"
+        resent = json.loads(run("run", "--rm", "-T", *smtp, "--entrypoint", "python", "tickets", "-",
+                                input=driver).strip().splitlines()[-1])
+        assert resent["counts"]["sent"] == 1, f"Notification was not sent after the suppression was removed: {resent}"
         # The terminal has its own keys, so the token's key with other content is a new ticket, not a conflict.
         local = command("create", "--title", "CLI ticket", "--message", "Same key as the token",
                         "--idempotency-key", key)
