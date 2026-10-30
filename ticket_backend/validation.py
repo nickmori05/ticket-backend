@@ -43,3 +43,13 @@ def require_id(identifier: int, name: str = "Ticket ID") -> int:
     if type(identifier) is not int or identifier < 1:
         raise ValueError(f"{name} must be a positive integer.")
     return identifier
+
+
+MAX_RETENTION_DAYS = 3650
+
+
+def require_age_days(days: int) -> str:
+    """Check a retention age and return it as an SQLite datetime modifier, such as '-30 days'."""
+    if type(days) is not int or not 1 <= days <= MAX_RETENTION_DAYS:
+        raise ValueError(f"Age must be a whole number of days from 1 to {MAX_RETENTION_DAYS}.")
+    return f"-{days} days"

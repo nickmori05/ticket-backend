@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 
 from ticket_backend.database import DEFAULT_DATABASE, connect
-from ticket_backend.validation import require_id, require_page
+from ticket_backend.validation import require_age_days, require_id, require_page
 
 
 NOTIFICATION_STATUSES = ("pending", "sent", "failed")
@@ -118,6 +118,19 @@ def retry_notifications(database: Path = DEFAULT_DATABASE, notification_ids: lis
                 dict(connection.execute("SELECT * FROM ticket_notifications WHERE id = ?", (identifier,)).fetchone())
                 for identifier in notification_ids
             ]
+
+
+def prune_notifications(older_than_days: int, database: Path = DEFAULT_DATABASE) -> dict:
+    """Delete notifications sent more than a number of days ago and return how many were deleted.
+
+    Pending and failed notifications are kept whatever their age, so nothing waiting to be sent or retried is lost.
+    """
+    age = require_age_days(older_than_days)
+    with closing(connect(database)) as connection, connection:
+        deleted = connection.execute(
+            "DELETE FROM ticket_notifications WHERE status = 'sent' AND sent_at < datetime('now', ?)", (age,)
+        ).rowcount
+    return {"deleted": deleted}
 
 
 def deliver_notifications(

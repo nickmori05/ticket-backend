@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS ticket_submission_keys (
     PRIMARY KEY (owner, idempotency_key)
 );
 
+CREATE INDEX IF NOT EXISTS ticket_submission_keys_created_at ON ticket_submission_keys(created_at);
+
 CREATE TABLE IF NOT EXISTS ticket_comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticket_id INTEGER NOT NULL REFERENCES tickets(id),

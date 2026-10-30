@@ -20,6 +20,13 @@ with SmtpStub() as stub:
 print(json.dumps({"code": code, "counts": json.loads(output.getvalue()),
                   "recipients": [recipients for _sender, recipients, _data in stub.messages]}))
 """
+# Make the smoke token's saved keys two days old, as if they had been kept that long.
+AGE_TOKEN_KEYS = """
+import sqlite3
+with sqlite3.connect("/data/tickets.db") as connection:
+    connection.execute("UPDATE ticket_submission_keys SET created_at = datetime('now', '-2 days') "
+                       "WHERE owner = 'smoke'")
+"""
 
 
 def main() -> int:
@@ -197,6 +204,11 @@ def main() -> int:
             except HTTPError as error:
                 assert error.code == 401, f"Expected 401 for a retired secret, got {error.code}"
         assert request(api_address(), "/stats")[0] == 200, "API refused the rotated token"
+        assert command("keys", "prune", "--older-than", "1") == {"deleted": 0}, "Pruning deleted fresh keys"
+        run("run", "--rm", "-T", "--entrypoint", "python", "tickets", "-c", AGE_TOKEN_KEYS)
+        assert command("keys", "prune", "--older-than", "1") == {"deleted": 1}, "CLI did not prune the old key"
+        status, renewed = request(api_address(), "/tickets", "POST", payload, key)
+        assert status == 201 and renewed["id"] != submitted["id"], "API replayed a pruned idempotency key"
         command("token", "revoke", "smoke")
         try:
             request(api_address(), "/stats")
@@ -205,7 +217,7 @@ def main() -> int:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
         print("Docker CLI/API sharing, API tokens with scopes and rotation, status attribution, comment edits, "
               "the audit log, rate limits, notification outbox, its API, and SMTP delivery, persistent per-token "
-              "retries, container recreation, and non-root execution passed.")
+              "retries and key pruning, container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)
