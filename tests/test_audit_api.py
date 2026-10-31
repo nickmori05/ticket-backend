@@ -145,7 +145,7 @@ class AuditApiTests(unittest.TestCase):
     def test_openapi_documents_the_audit_route(self):
         operation = self.client.get("/openapi.json").json()["paths"]["/audit"]["get"]
         self.assertEqual({parameter["name"] for parameter in operation["parameters"]},
-                         {"limit", "offset", "token", "ticket_id"})
+                         {"limit", "offset", "token", "ticket_id", "status", "since", "until"})
         self.assertTrue({"200", "401", "403"} <= set(operation["responses"]))
 
 

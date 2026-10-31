@@ -75,7 +75,8 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `prune-notifications --older-than DAYS` | Delete notifications sent more than 1 to 3650 days ago |
 | `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
-| `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
+| `audit list [--token NAME] [--ticket ID] [--status CODE] [--since TIME] [--until TIME] [--limit N] [--offset N]` | List recorded API requests, newest first |
+| `audit summary [--since TIME] [--until TIME]` | Count each token's requests by outcome, least recently used first |
 | `audit prune --older-than DAYS` | Delete recorded API requests older than 1 to 3650 days |
 | `keys prune --older-than DAYS` | Delete idempotency keys saved more than 1 to 3650 days ago |
 
@@ -123,7 +124,8 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /notifications` | `notifications:read` | Outbox, oldest first, with optional `status`, `ticket_id`, `limit`, and `offset` |
 | `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
 | `POST /notifications/retry` | `notifications:write` | Requeue failed notifications from JSON `ids`, or all failed ones without a body |
-| `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `limit`, and `offset` |
+| `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `status`, `since`, `until`, `limit`, and `offset` |
+| `GET /audit/summary` | `audit:read` | Each token's request counts by outcome and its first and last request, with optional `since` and `until` |
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
@@ -220,6 +222,37 @@ python3 tickets.py audit list --token web-form
 python3 tickets.py audit list --ticket 1
 curl -H "Authorization: Bearer $TICKETS_TOKEN" 'http://127.0.0.1:8000/audit?token=web-form&limit=50'
 ```
+
+Filters narrow the list and combine with each other. `--status` (`status` over HTTP)
+takes one code, such as `403`, or a class, such as `4xx`. `--since` and `--until` take
+a date (`2026-10-31`) or a time (`2026-10-31T14:00`, with optional seconds and a `Z`
+or `+02:00` offset); a time without an offset is UTC, like every stored time. `since`
+is inclusive and `until` is not, so consecutive windows never count a request twice.
+Over HTTP, write `+` in an offset as `%2B`, or use `Z`.
+
+```sh
+python3 tickets.py audit list --status 403 --since 2026-10-01
+python3 tickets.py audit list --token web-form --status 5xx --since 2026-10-31T09:00 --until 2026-10-31T10:00
+curl -H "Authorization: Bearer $TICKETS_TOKEN" 'http://127.0.0.1:8000/audit?status=4xx&since=2026-10-31T00:00:00Z'
+```
+
+`audit summary` (`GET /audit/summary`) gives one row per token: its requests in the
+window, how many succeeded (below 400), got a 4xx (with 403s, a missing scope, also
+counted separately as `forbidden`) or a 5xx, and its first and last request. Every
+token that is neither revoked nor expired is listed, with zero requests if it made
+none, and the least recently used come first, so tokens nobody uses any more are at
+the top, ready to revoke. Revoked and expired tokens appear only if they made requests
+in the window.
+
+```text
+$ python3 tickets.py audit summary --since 2026-10-01
+nightly-import: no requests
+web-form: 412 requests, last 2026-10-30 22:14:09 UTC (409 succeeded, 3 client errors, 0 server errors)
+dashboard: 2210 requests, last 2026-10-31 09:02:51 UTC (2150 succeeded, 60 client errors (58 forbidden), 0 server errors)
+```
+
+Counts come from the log, so they cover only what has not been pruned, and requests
+refused for the rate limit are not included.
 
 Query strings are left out because `search` can hold any text a client sent, and
 nothing in a path is an email. Reading the log is recorded like any other request.
@@ -405,7 +438,8 @@ it records the real status code without checking the token again. A route that
 creates a ticket also stores the new ID. Because the row is written after the
 request's own transaction commits, a storage failure while recording is logged and
 the response is still returned: the change has already happened, and failing the
-request would invite a retry.
+request would invite a retry. An index on the request time keeps time-window filters
+and `audit prune` from reading the whole log.
 
 **Rate limits.** Each token has a bucket in memory holding up to its limit, refilled
 at that many requests per minute, behind one lock so concurrent requests cannot
@@ -450,6 +484,7 @@ gets 429 and is not audited, that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the CLI prunes an old key so the API's next retry creates a new ticket,
+that both filter the audit log by status and time and summarize it by token,
 that the image runs as a
 non-root user, and that `send-notifications` delivers through the image. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
