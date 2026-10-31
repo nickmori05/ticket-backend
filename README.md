@@ -484,6 +484,7 @@ gets 429 and is not audited, that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
 token's, that the CLI prunes an old key so the API's next retry creates a new ticket,
+that both filter the audit log by status and time and summarize it by token,
 that the image runs as a
 non-root user, and that `send-notifications` delivers through the image. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub

@@ -125,6 +125,18 @@ def main() -> int:
             raise AssertionError("API showed the audit log to a token without audit:read")
         except HTTPError as error:
             assert error.code == 403, f"Expected 403 for the audit log without its scope, got {error.code}"
+        status, refused = request(address, "/audit?token=smoke-reader&status=4xx&since=2000-01-01T00:00:00Z")
+        assert status == 200 and [(row["route"], row["status"]) for row in refused] == \
+            [("/audit", 403), ("/tickets", 403)], f"API did not filter the audit log by status and time: {refused}"
+        assert command("audit", "list", "--token", "smoke-reader", "--since", "2999-01-01") == [], \
+            "CLI listed audited requests from before --since"
+        status, summary = request(address, "/audit/summary")
+        reader_counts = {row["token"]: (row["requests"], row["succeeded"], row["forbidden"]) for row in summary}
+        assert status == 200 and reader_counts["smoke-reader"] == (3, 1, 2) and \
+            reader_counts["smoke-limited"] == (2, 2, 0), f"API summarized the audit log wrongly: {reader_counts}"
+        idle = {row["token"]: row["requests"] for row in command("audit", "summary", "--since", "2999-01-01")}
+        assert idle == {"smoke": 0, "smoke-reader": 0, "smoke-limited": 0}, \
+            f"CLI summary did not list every active token for an empty window: {idle}"
         events = command("history", http_id)
         assert [event["author"] for event in events] == ["smoke", "smoke"], "CLI did not see status authors"
         assert command("history", identifier)[-1]["author"] is None, "CLI status change gained an author"
