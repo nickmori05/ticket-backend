@@ -1,5 +1,6 @@
 """Input checks shared by the storage modules. Each raises ValueError with a message safe to show to callers."""
 
+from datetime import datetime, timezone
 import re
 
 
@@ -53,3 +54,24 @@ def require_age_days(days: int) -> str:
     if type(days) is not int or not 1 <= days <= MAX_RETENTION_DAYS:
         raise ValueError(f"Age must be a whole number of days from 1 to {MAX_RETENTION_DAYS}.")
     return f"-{days} days"
+
+
+def optional_timestamp(value: str | None, name: str) -> str | None:
+    """Check a date, or a date and time, and return it in UTC as SQLite stores CURRENT_TIMESTAMP.
+
+    A time without an offset is taken to be UTC, like every stored time, and a date alone means its first second.
+    """
+    if value is None:
+        return None
+    # One fixed form, because datetime.fromisoformat accepts more of ISO 8601 on newer Pythons than on 3.10.
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d\d-\d\d([T ]\d\d:\d\d(:\d\d)?)?(Z|[+-]\d\d:\d\d)?", value.strip(),
+    ):
+        raise ValueError(f"{name} must be a date or a time in UTC, like 2026-10-31 or 2026-10-31T14:00:00Z.")
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if moment.tzinfo is not None:
+            moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+    except (ValueError, OverflowError):
+        raise ValueError(f"{name} is not a valid date or time.") from None
+    return moment.isoformat(sep=" ")

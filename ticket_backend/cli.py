@@ -84,6 +84,9 @@ def parser() -> argparse.ArgumentParser:
     audit_list = audit_actions.add_parser("list", help="Show recorded API requests, newest first")
     audit_list.add_argument("--token", metavar="NAME", help="Only requests made by this token")
     audit_list.add_argument("--ticket", type=int, metavar="ID", help="Only requests about this ticket")
+    audit_list.add_argument("--status", metavar="CODE", help="Only this code, such as 403, or class, such as 4xx")
+    audit_list.add_argument("--since", metavar="TIME", help="Only requests at or after this UTC date or time")
+    audit_list.add_argument("--until", metavar="TIME", help="Only requests before this UTC date or time")
     audit_list.add_argument("--limit", type=int, default=20)
     audit_list.add_argument("--offset", type=int, default=0)
     audit_prune = audit_actions.add_parser("prune", help="Delete recorded requests older than a number of days")
@@ -238,7 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "prune-notifications":
             result = prune_notifications(args.older_than, args.database)
         elif args.command == "audit" and args.action == "list":
-            result = list_audit(args.database, args.limit, offset=args.offset, token=args.token, ticket_id=args.ticket)
+            result = list_audit(args.database, args.limit, offset=args.offset, token=args.token, ticket_id=args.ticket,
+                                status=args.status, since=args.since, until=args.until)
         elif args.command == "audit":
             result = prune_audit(args.older_than, args.database)
         elif args.command == "keys":

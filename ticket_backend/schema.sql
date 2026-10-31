@@ -94,5 +94,6 @@ CREATE TABLE IF NOT EXISTS api_audit_log (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE INDEX IF NOT EXISTS api_audit_log_created_at ON api_audit_log(created_at);
 CREATE INDEX IF NOT EXISTS api_audit_log_token ON api_audit_log(token, id);
 CREATE INDEX IF NOT EXISTS api_audit_log_ticket_id ON api_audit_log(ticket_id, id);

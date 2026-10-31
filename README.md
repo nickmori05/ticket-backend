@@ -75,7 +75,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `prune-notifications --older-than DAYS` | Delete notifications sent more than 1 to 3650 days ago |
 | `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
-| `audit list [--token NAME] [--ticket ID] [--limit N] [--offset N]` | List recorded API requests, newest first |
+| `audit list [--token NAME] [--ticket ID] [--status CODE] [--since TIME] [--until TIME] [--limit N] [--offset N]` | List recorded API requests, newest first |
 | `audit prune --older-than DAYS` | Delete recorded API requests older than 1 to 3650 days |
 | `keys prune --older-than DAYS` | Delete idempotency keys saved more than 1 to 3650 days ago |
 
@@ -123,7 +123,7 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /notifications` | `notifications:read` | Outbox, oldest first, with optional `status`, `ticket_id`, `limit`, and `offset` |
 | `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
 | `POST /notifications/retry` | `notifications:write` | Requeue failed notifications from JSON `ids`, or all failed ones without a body |
-| `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `limit`, and `offset` |
+| `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `status`, `since`, `until`, `limit`, and `offset` |
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
@@ -219,6 +219,19 @@ and the docs are not recorded.
 python3 tickets.py audit list --token web-form
 python3 tickets.py audit list --ticket 1
 curl -H "Authorization: Bearer $TICKETS_TOKEN" 'http://127.0.0.1:8000/audit?token=web-form&limit=50'
+```
+
+Filters narrow the list and combine with each other. `--status` (`status` over HTTP)
+takes one code, such as `403`, or a class, such as `4xx`. `--since` and `--until` take
+a date (`2026-10-31`) or a time (`2026-10-31T14:00`, with optional seconds and a `Z`
+or `+02:00` offset); a time without an offset is UTC, like every stored time. `since`
+is inclusive and `until` is not, so consecutive windows never count a request twice.
+Over HTTP, write `+` in an offset as `%2B`, or use `Z`.
+
+```sh
+python3 tickets.py audit list --status 403 --since 2026-10-01
+python3 tickets.py audit list --token web-form --status 5xx --since 2026-10-31T09:00 --until 2026-10-31T10:00
+curl -H "Authorization: Bearer $TICKETS_TOKEN" 'http://127.0.0.1:8000/audit?status=4xx&since=2026-10-31T00:00:00Z'
 ```
 
 Query strings are left out because `search` can hold any text a client sent, and
@@ -405,7 +418,8 @@ it records the real status code without checking the token again. A route that
 creates a ticket also stores the new ID. Because the row is written after the
 request's own transaction commits, a storage failure while recording is logged and
 the response is still returned: the change has already happened, and failing the
-request would invite a retry.
+request would invite a retry. An index on the request time keeps time-window filters
+and `audit prune` from reading the whole log.
 
 **Rate limits.** Each token has a bucket in memory holding up to its limit, refilled
 at that many requests per minute, behind one lock so concurrent requests cannot

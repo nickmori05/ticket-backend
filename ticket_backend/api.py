@@ -122,6 +122,11 @@ class AuditOutput(BaseModel):
     created_at: str
 
 
+AUDIT_STATUS = "Only responses with this status code, such as 403, or in this class, such as 4xx"
+AUDIT_SINCE = "Only requests made at or after this date or time, such as 2026-10-31 or 2026-10-31T14:00:00Z (UTC)"
+AUDIT_UNTIL = "Only requests made before this date or time (UTC when no offset is given)"
+
+
 class RetryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(
@@ -307,8 +312,12 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
         offset: Annotated[int, Query(ge=0)] = 0,
         token: Annotated[str | None, Query(max_length=64, description="Only requests made by this token")] = None,
         ticket_id: Annotated[int | None, Query(gt=0, description="Only requests about this ticket")] = None,
+        status: Annotated[str | None, Query(pattern=r"^[1-5](\d\d|xx)$", description=AUDIT_STATUS)] = None,
+        since: Annotated[str | None, Query(max_length=32, description=AUDIT_SINCE)] = None,
+        until: Annotated[str | None, Query(max_length=32, description=AUDIT_UNTIL)] = None,
     ):
-        return list_audit(database, limit, offset=offset, token=token, ticket_id=ticket_id)
+        return list_audit(database, limit, offset=offset, token=token, ticket_id=ticket_id, status=status,
+                          since=since, until=until)
 
     app.include_router(protected)
     return app
