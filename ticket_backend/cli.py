@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 import sys
 
-from ticket_backend.audit import list_audit, prune_audit
+from ticket_backend.audit import list_audit, prune_audit, summarize_audit
 from ticket_backend.database import DEFAULT_DATABASE
 from ticket_backend.mailer import DeliveryError, SmtpSender, settings_from_environment
 from ticket_backend.notifications import (
@@ -89,6 +89,9 @@ def parser() -> argparse.ArgumentParser:
     audit_list.add_argument("--until", metavar="TIME", help="Only requests before this UTC date or time")
     audit_list.add_argument("--limit", type=int, default=20)
     audit_list.add_argument("--offset", type=int, default=0)
+    audit_summary = audit_actions.add_parser("summary", help="Count each token's requests, least recently used first")
+    audit_summary.add_argument("--since", metavar="TIME", help="Only requests at or after this UTC date or time")
+    audit_summary.add_argument("--until", metavar="TIME", help="Only requests before this UTC date or time")
     audit_prune = audit_actions.add_parser("prune", help="Delete recorded requests older than a number of days")
     audit_prune.add_argument("--older-than", type=int, required=True, metavar="DAYS")
     keys = commands.add_parser("keys", help="Manage saved idempotency keys")
@@ -154,6 +157,19 @@ def display(command: str, result, action: str | None = None) -> None:
         for row in result:
             ticket = f" (ticket #{row['ticket_id']})" if row["ticket_id"] is not None else ""
             print(f"{row['created_at']} UTC, {row['token']}: {row['method']} {row['path']} -> {row['status']}{ticket}")
+    elif command == "audit" and action == "summary":
+        if not result:
+            print("No API tokens or recorded requests.")
+        for row in result:
+            if not row["requests"]:
+                print(f"{row['token']}: no requests")
+                continue
+            outcomes = f"{row['succeeded']} succeeded, {plural(row['client_errors'], 'client error')}"
+            if row["forbidden"]:
+                outcomes += f" ({row['forbidden']} forbidden)"
+            outcomes += f", {plural(row['server_errors'], 'server error')}"
+            print(f"{row['token']}: {plural(row['requests'], 'request')}, last {row['last_request_at']} UTC "
+                  f"({outcomes})")
     elif command == "audit":
         print(f"Deleted {result['deleted']} recorded API request" + ("." if result["deleted"] == 1 else "s."))
     elif command == "keys":
@@ -180,6 +196,10 @@ def display(command: str, result, action: str | None = None) -> None:
             print(f"{row['name']} [{row['state']}] {' '.join(row['scopes'])} ({', '.join(details)})")
     elif action == "revoke":
         print(f"Token {result['name']} revoked.")
+
+
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
 
 
 def rate_limit_text(limit: int) -> str:
@@ -243,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "audit" and args.action == "list":
             result = list_audit(args.database, args.limit, offset=args.offset, token=args.token, ticket_id=args.ticket,
                                 status=args.status, since=args.since, until=args.until)
+        elif args.command == "audit" and args.action == "summary":
+            result = summarize_audit(args.database, since=args.since, until=args.until)
         elif args.command == "audit":
             result = prune_audit(args.older_than, args.database)
         elif args.command == "keys":

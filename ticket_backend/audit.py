@@ -67,6 +67,43 @@ def list_audit(
         ]
 
 
+def summarize_audit(
+    database: Path = DEFAULT_DATABASE, *, since: str | None = None, until: str | None = None,
+) -> list[dict]:
+    """Count each token's recorded requests by outcome, with its first and last request, least recently used first.
+
+    Every token that is neither revoked nor expired is included, with zero requests if it made none in the window, so
+    tokens nobody uses any more stand out. Revoked and expired tokens appear only if they made requests in the window.
+    """
+    clauses, parameters = _window(since, until)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    with closing(connect(database)) as connection:
+        return [
+            dict(row) for row in connection.execute(
+                """WITH requests AS (
+                       SELECT token, COUNT(*) AS requests,
+                              SUM(status < 400) AS succeeded,
+                              SUM(status BETWEEN 400 AND 499) AS client_errors,
+                              SUM(status = 403) AS forbidden,
+                              SUM(status >= 500) AS server_errors,
+                              MIN(created_at) AS first_request_at,
+                              MAX(created_at) AS last_request_at
+                       FROM api_audit_log""" + where + """ GROUP BY token
+                   ), names AS (
+                       SELECT name AS token FROM api_tokens WHERE revoked_at IS NULL
+                           AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                       UNION SELECT token FROM requests
+                   )
+                   SELECT names.token, COALESCE(requests, 0) AS requests, COALESCE(succeeded, 0) AS succeeded,
+                          COALESCE(client_errors, 0) AS client_errors, COALESCE(forbidden, 0) AS forbidden,
+                          COALESCE(server_errors, 0) AS server_errors, first_request_at, last_request_at
+                   FROM names LEFT JOIN requests USING (token)
+                   ORDER BY last_request_at IS NOT NULL, last_request_at, names.token""",
+                parameters,
+            )
+        ]
+
+
 def _window(since: str | None, until: str | None) -> tuple[list[str], list]:
     """Return SQL clauses and parameters that keep requests made from since up to, but not including, until."""
     since, until = optional_timestamp(since, "Since"), optional_timestamp(until, "Until")

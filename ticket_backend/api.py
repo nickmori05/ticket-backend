@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ticket_backend import __version__
 from ticket_backend.api_audit import record_requests
-from ticket_backend.audit import list_audit
+from ticket_backend.audit import list_audit, summarize_audit
 from ticket_backend.database import DEFAULT_DATABASE
 from ticket_backend.notifications import (
     NotificationNotFoundError, NotificationStateError, get_notification, list_notifications, retry_notifications,
@@ -120,6 +120,17 @@ class AuditOutput(BaseModel):
     status: Annotated[int, Field(description="HTTP status code of the response.")]
     client: Annotated[str | None, Field(description="Address of the client, or of the proxy in front of it.")]
     created_at: str
+
+
+class AuditSummaryOutput(BaseModel):
+    token: Annotated[str, Field(description="Token name.")]
+    requests: Annotated[int, Field(description="Recorded requests in the window.")]
+    succeeded: Annotated[int, Field(description="Requests answered with a status below 400.")]
+    client_errors: Annotated[int, Field(description="Requests answered with a 4xx status, including 403s.")]
+    forbidden: Annotated[int, Field(description="Requests refused because the token lacked the route's scope.")]
+    server_errors: Annotated[int, Field(description="Requests answered with a 5xx status.")]
+    first_request_at: str | None
+    last_request_at: Annotated[str | None, Field(description="Null when the token made no requests in the window.")]
 
 
 AUDIT_STATUS = "Only responses with this status code, such as 403, or in this class, such as 4xx"
@@ -318,6 +329,14 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
     ):
         return list_audit(database, limit, offset=offset, token=token, ticket_id=ticket_id, status=status,
                           since=since, until=until)
+
+    @protected.get("/audit/summary", response_model=list[AuditSummaryOutput], dependencies=[Depends(auditor)])
+    def audit_summary(
+        since: Annotated[str | None, Query(max_length=32, description=AUDIT_SINCE)] = None,
+        until: Annotated[str | None, Query(max_length=32, description=AUDIT_UNTIL)] = None,
+    ):
+        """Each token's requests by outcome, least recently used first, including active tokens that made none."""
+        return summarize_audit(database, since=since, until=until)
 
     app.include_router(protected)
     return app

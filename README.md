@@ -76,6 +76,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `token create NAME [--scope S ...] [--expires-in DAYS] [--rate-limit N]` | Create an API token, shown once |
 | `token list` / `token revoke NAME` | List tokens with their scopes and state / revoke one |
 | `audit list [--token NAME] [--ticket ID] [--status CODE] [--since TIME] [--until TIME] [--limit N] [--offset N]` | List recorded API requests, newest first |
+| `audit summary [--since TIME] [--until TIME]` | Count each token's requests by outcome, least recently used first |
 | `audit prune --older-than DAYS` | Delete recorded API requests older than 1 to 3650 days |
 | `keys prune --older-than DAYS` | Delete idempotency keys saved more than 1 to 3650 days ago |
 
@@ -124,6 +125,7 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | `GET /notifications/{id}` | `notifications:read` | One notification with its attempts and last error |
 | `POST /notifications/retry` | `notifications:write` | Requeue failed notifications from JSON `ids`, or all failed ones without a body |
 | `GET /audit` | `audit:read` | Recorded API requests, newest first, with optional `token`, `ticket_id`, `status`, `since`, `until`, `limit`, and `offset` |
+| `GET /audit/summary` | `audit:read` | Each token's request counts by outcome and its first and last request, with optional `since` and `until` |
 
 ```sh
 curl -i http://127.0.0.1:8000/tickets \
@@ -233,6 +235,24 @@ python3 tickets.py audit list --status 403 --since 2026-10-01
 python3 tickets.py audit list --token web-form --status 5xx --since 2026-10-31T09:00 --until 2026-10-31T10:00
 curl -H "Authorization: Bearer $TICKETS_TOKEN" 'http://127.0.0.1:8000/audit?status=4xx&since=2026-10-31T00:00:00Z'
 ```
+
+`audit summary` (`GET /audit/summary`) gives one row per token: its requests in the
+window, how many succeeded (below 400), got a 4xx (with 403s, a missing scope, also
+counted separately as `forbidden`) or a 5xx, and its first and last request. Every
+token that is neither revoked nor expired is listed, with zero requests if it made
+none, and the least recently used come first, so tokens nobody uses any more are at
+the top, ready to revoke. Revoked and expired tokens appear only if they made requests
+in the window.
+
+```text
+$ python3 tickets.py audit summary --since 2026-10-01
+nightly-import: no requests
+web-form: 412 requests, last 2026-10-30 22:14:09 UTC (409 succeeded, 3 client errors, 0 server errors)
+dashboard: 2210 requests, last 2026-10-31 09:02:51 UTC (2150 succeeded, 60 client errors (58 forbidden), 0 server errors)
+```
+
+Counts come from the log, so they cover only what has not been pruned, and requests
+refused for the rate limit are not included.
 
 Query strings are left out because `search` can hold any text a client sent, and
 nothing in a path is an email. Reading the log is recorded like any other request.
