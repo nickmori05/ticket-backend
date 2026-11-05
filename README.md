@@ -64,7 +64,9 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | --- | --- |
 | `create [--title T] [--message M] [--email E] [--idempotency-key K]` | Submit a ticket; prompts for a missing title or message |
 | `show ID` | Show one ticket |
-| `list [--status S] [--search TEXT] [--limit N] [--offset N]` | List tickets, newest first |
+| `list [--status S] [--search TEXT] [--label L ...] [--limit N] [--offset N]` | List tickets, newest first |
+| `label ID LABEL ...` / `unlabel ID LABEL ...` | Add / remove [labels](#labels) on a ticket |
+| `labels [ID]` | Show a ticket's labels, or every label in use with its ticket counts |
 | `status ID STATUS [--note TEXT]` | Change status to `open`, `in_progress`, or `closed` |
 | `history ID` | Show recorded status changes |
 | `comment ID BODY` / `comments ID` | Add a comment / list comments, oldest first |
@@ -105,6 +107,44 @@ from 1 to 100 (default 20) and `--offset`. Search matches literal, case-insensit
 text in the title or message, so `%` and `_` are not wildcards. Closed tickets can be
 reopened, and setting the current status again records nothing.
 
+## Labels
+
+Labels group tickets across statuses, such as by team, product area, or priority. A
+label is 1 to 32 ASCII letters, digits, dots, colons, underscores, or hyphens,
+starting with a letter or digit, and is stored in lowercase, so `Billing` and
+`billing` are the same label. A ticket can have up to 20.
+
+```sh
+python3 tickets.py label 1 billing priority:high
+python3 tickets.py unlabel 1 priority:high
+python3 tickets.py list --label billing --status open
+python3 tickets.py labels
+```
+
+Adding a label a ticket already has, or removing one it does not have, changes
+nothing and is not an error, so retrying either is safe. Labels can be changed on
+tickets in any status, and they do not record history or queue notifications.
+`list --label` can be repeated, up to five times, to find tickets with every one of
+the labels, and combines with `--status` and `--search`. `labels` without an ID
+lists every label in use, alphabetically, with how many tickets have it and how many
+of those are not closed. A label stops being listed once no ticket has it; there is
+no separate list of allowed labels.
+
+Over HTTP, `PUT` and `DELETE /tickets/{id}/labels/{label}` add and remove one label
+with `tickets:write`, and the label filter and listings need `tickets:read`. Both
+changes are idempotent and return 200 with every label the ticket then has, so a
+client can retry them without an `Idempotency-Key`. An invalid label, or a 21st one,
+returns 422.
+
+```sh
+curl -X PUT -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1/labels/billing
+curl -H "Authorization: Bearer $TICKETS_TOKEN" 'http://127.0.0.1:8000/tickets?label=billing&label=priority:high'
+```
+
+Label changes are recorded in the [audit log](#audit-log) like any other request, with
+the label in the path, but not in the ticket's history, so the log is the only record
+of who changed a label.
+
 ## HTTP API
 
 Every endpoint except `/health` and the docs requires `Authorization: Bearer TOKEN`.
@@ -113,8 +153,11 @@ Every endpoint except `/health` and the docs requires `Authorization: Bearer TOK
 | --- | --- | --- |
 | `GET /health` | none | Process health; does not check the database or need a token |
 | `POST /tickets` | `tickets:write` | Create from JSON `title`, `message`, and optional `email`; returns 201 and `Location` |
-| `GET /tickets` | `tickets:read` | List with optional `status`, `search`, `limit`, and `offset` |
+| `GET /tickets` | `tickets:read` | List with optional `status`, `search`, `label` (repeatable), `limit`, and `offset` |
 | `GET /tickets/{id}` | `tickets:read` | Retrieve a ticket |
+| `GET /tickets/{id}/labels` | `tickets:read` | The ticket's [labels](#labels), alphabetically |
+| `PUT /tickets/{id}/labels/{label}` / `DELETE ...` | `tickets:write` | Add / remove one label; returns every label the ticket has |
+| `GET /labels` | `tickets:read` | Every label in use, with its ticket counts |
 | `PATCH /tickets/{id}/status` | `tickets:write` | Change status from JSON `status` and optional `note` |
 | `GET /tickets/{id}/history` | `tickets:read` | Recorded status changes, each with its `author` |
 | `POST /tickets/{id}/comments` | `tickets:write` | Add a comment from JSON `body`; returns 201 |
@@ -338,6 +381,7 @@ ticket_backend/
   api_audit.py              middleware that records each authenticated request
   audit.py                  audit log storage, listing, and pruning
   tickets.py                tickets, status history, comments, statistics
+  labels.py                 ticket labels and the label filter for listings
   submissions.py            idempotency keys, scoped to each token, and their pruning
   tokens.py                 token creation, revocation, and authentication
   ratelimit.py              per-token request limits kept in memory

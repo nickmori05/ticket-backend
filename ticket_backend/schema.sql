@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS ticket_comments (
 
 CREATE INDEX IF NOT EXISTS ticket_comments_ticket_id ON ticket_comments(ticket_id, id);
 
+-- Labels are lowercase; see labels.py. Tickets are never deleted, so labels are only removed one at a time.
+CREATE TABLE IF NOT EXISTS ticket_labels (
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id),
+    label TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (ticket_id, label)
+);
+
+CREATE INDEX IF NOT EXISTS ticket_labels_label ON ticket_labels(label, ticket_id);
+
 CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,

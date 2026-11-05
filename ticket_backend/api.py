@@ -23,6 +23,7 @@ from ticket_backend import __version__
 from ticket_backend.api_audit import record_requests
 from ticket_backend.audit import list_audit
 from ticket_backend.database import DEFAULT_DATABASE
+from ticket_backend.labels import add_labels, label_counts, remove_labels, ticket_labels
 from ticket_backend.notifications import (
     NotificationNotFoundError, NotificationStateError, get_notification, list_notifications, retry_notifications,
 )
@@ -92,6 +93,21 @@ class CommentOutput(BaseModel):
 class StatsOutput(BaseModel):
     total: int
     by_status: dict[str, int]
+
+
+Label = Annotated[str, PathParameter(min_length=1, max_length=32,
+                                     description="Such as billing or priority:high; stored in lowercase")]
+
+
+class TicketLabelsOutput(BaseModel):
+    ticket_id: int
+    labels: Annotated[list[str], Field(description="Every label the ticket has, alphabetically.")]
+
+
+class LabelCountOutput(BaseModel):
+    label: str
+    tickets: Annotated[int, Field(description="Tickets with this label.")]
+    unresolved: Annotated[int, Field(description="Tickets with this label that are not closed.")]
 
 
 class NotificationOutput(BaseModel):
@@ -250,9 +266,11 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
         offset: Annotated[int, Query(ge=0)] = 0,
         status: Status | None = None,
         search: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+        label: Annotated[list[str] | None, Query(max_length=5, description="Only tickets with this label; "
+                                                                           "repeat to require several")] = None,
     ):
-        return [shown(ticket, access)
-                for ticket in list_tickets(database, limit, offset=offset, status=status, search=search)]
+        tickets = list_tickets(database, limit, offset=offset, status=status, search=search, labels=label)
+        return [shown(ticket, access) for ticket in tickets]
 
     @protected.get("/tickets/{ticket_id}", response_model=TicketOutput)
     def show(ticket_id: TicketId, access: Annotated[dict, Depends(reader)]):
@@ -265,6 +283,26 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
     @protected.get("/tickets/{ticket_id}/history", response_model=list[EventOutput], dependencies=[Depends(reader)])
     def history(ticket_id: TicketId):
         return ticket_history(ticket_id, database)
+
+    @protected.get("/tickets/{ticket_id}/labels", response_model=TicketLabelsOutput, dependencies=[Depends(reader)])
+    def labels(ticket_id: TicketId):
+        return ticket_labels(ticket_id, database)
+
+    # Adding and removing are idempotent, so both use the label as the resource and return every label the ticket has.
+    @protected.put("/tickets/{ticket_id}/labels/{label}", response_model=TicketLabelsOutput,
+                   dependencies=[Depends(writer)])
+    def label(ticket_id: TicketId, label: Label):
+        return add_labels(ticket_id, [label], database)
+
+    @protected.delete("/tickets/{ticket_id}/labels/{label}", response_model=TicketLabelsOutput,
+                      dependencies=[Depends(writer)])
+    def unlabel(ticket_id: TicketId, label: Label):
+        return remove_labels(ticket_id, [label], database)
+
+    @protected.get("/labels", response_model=list[LabelCountOutput], dependencies=[Depends(reader)])
+    def labels_in_use():
+        """Every label in use, alphabetically, with how many tickets have it and how many of those are not closed."""
+        return label_counts(database)
 
     @protected.post("/tickets/{ticket_id}/comments", status_code=201, response_model=CommentOutput)
     def comment(ticket_id: TicketId, payload: CommentInput, access: Annotated[dict, Depends(writer)]):
