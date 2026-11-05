@@ -143,6 +143,18 @@ def main() -> int:
         assert command("stats")["total"] == 2, "Retry created a duplicate ticket"
         assert len(command("history", http_id)) == 2, "Retry added duplicate history"
         assert len(command("outbox")) == 2, "Retry queued a duplicate notification"
+        status, labelled = request(api_address(), f"/tickets/{http_id}/labels/Billing", "PUT")
+        assert status == 200 and labelled == {"ticket_id": int(http_id), "labels": ["billing"]}
+        assert command("labels", http_id)["labels"] == ["billing"], "CLI did not see a label added over HTTP"
+        assert command("label", identifier, "billing", "urgent")["labels"] == ["billing", "urgent"]
+        status, found = request(api_address(), "/tickets?label=billing")
+        assert status == 200 and [row["id"] for row in found] == [int(http_id), int(identifier)], \
+            "API did not filter by a label added from the CLI"
+        assert request(api_address(), "/labels")[1] == [{"label": "billing", "tickets": 2, "unresolved": 0},
+                                                        {"label": "urgent", "tickets": 1, "unresolved": 0}]
+        assert request(api_address(), f"/tickets/{identifier}/labels/urgent", "DELETE")[1]["labels"] == ["billing"]
+        assert [row["id"] for row in command("list", "--label", "billing", "--label", "urgent")] == [], \
+            "CLI still saw a label removed over HTTP"
         smtp = ["-e", "TICKETS_SMTP_FROM=support@example.com", "-e", "TICKETS_SMTP_SECURITY=none"]
         refused = run("run", "--rm", "-T", "-e", "TICKETS_SMTP_HOST=127.0.0.1", "-e", "TICKETS_SMTP_PORT=1", *smtp,
                       "tickets", "send-notifications", check=False)
