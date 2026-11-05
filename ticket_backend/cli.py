@@ -8,6 +8,7 @@ import sys
 
 from ticket_backend.audit import list_audit, prune_audit
 from ticket_backend.database import DEFAULT_DATABASE
+from ticket_backend.labels import add_labels, label_counts, remove_labels, ticket_labels
 from ticket_backend.mailer import DeliveryError, SmtpSender, settings_from_environment
 from ticket_backend.notifications import (
     NOTIFICATION_STATUSES, NotificationNotFoundError, count_due_notifications, deliver_notifications,
@@ -39,8 +40,18 @@ def parser() -> argparse.ArgumentParser:
     listing = commands.add_parser("list", help="Find recent tickets")
     listing.add_argument("--status", choices=STATUSES)
     listing.add_argument("--search", help="Match literal text in title or message")
+    listing.add_argument("--label", action="append", dest="labels", metavar="LABEL",
+                         help="Only tickets with this label; repeat to require several")
     listing.add_argument("--limit", type=int, default=20)
     listing.add_argument("--offset", type=int, default=0)
+    label = commands.add_parser("label", help="Add labels to a ticket")
+    label.add_argument("id", type=int)
+    label.add_argument("labels", nargs="+", metavar="LABEL", help="Such as billing or priority:high")
+    unlabel = commands.add_parser("unlabel", help="Remove labels from a ticket")
+    unlabel.add_argument("id", type=int)
+    unlabel.add_argument("labels", nargs="+", metavar="LABEL")
+    labels = commands.add_parser("labels", help="Show a ticket's labels, or every label in use")
+    labels.add_argument("id", type=int, nargs="?")
     status = commands.add_parser("status", help="Change a ticket's status")
     status.add_argument("id", type=int)
     status.add_argument("status", choices=STATUSES)
@@ -108,6 +119,14 @@ def display(command: str, result, action: str | None = None) -> None:
             print("No tickets found.")
         for row in result:
             print(f"#{row['id']} [{row['status']}] {row['title']}")
+    elif command in ("label", "unlabel") or (command == "labels" and isinstance(result, dict)):
+        print(f"Ticket #{result['ticket_id']} labels: {', '.join(result['labels']) or 'none'}")
+    elif command == "labels":
+        if not result:
+            print("No labels in use.")
+        for row in result:
+            print(f"{row['label']}: {row['tickets']} ticket" + ("" if row["tickets"] == 1 else "s")
+                  + f", {row['unresolved']} not closed")
     elif command == "history":
         if not result:
             print("No recorded changes for this ticket.")
@@ -217,7 +236,13 @@ def main(argv: list[str] | None = None) -> int:
             result = get_ticket(args.id, args.database)
         elif args.command == "list":
             result = list_tickets(args.database, args.limit, offset=args.offset,
-                                  status=args.status, search=args.search)
+                                  status=args.status, search=args.search, labels=args.labels)
+        elif args.command == "label":
+            result = add_labels(args.id, args.labels, args.database)
+        elif args.command == "unlabel":
+            result = remove_labels(args.id, args.labels, args.database)
+        elif args.command == "labels":
+            result = label_counts(args.database) if args.id is None else ticket_labels(args.id, args.database)
         elif args.command == "status":
             result = set_status(args.id, args.status, args.database, note=args.note)
         elif args.command == "history":

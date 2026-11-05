@@ -4,6 +4,7 @@ from contextlib import closing
 from pathlib import Path
 
 from ticket_backend.database import DEFAULT_DATABASE, connect
+from ticket_backend.labels import label_filter
 from ticket_backend.notifications import queue_notification
 from ticket_backend.submissions import require_key, save_submission, saved_submission
 from ticket_backend.validation import optional_author, optional_email, require_id, require_page, require_text
@@ -87,8 +88,12 @@ def list_tickets(
     offset: int = 0,
     status: str | None = None,
     search: str | None = None,
+    labels: list[str] | None = None,
 ) -> list[dict]:
-    """Return tickets newest first, optionally filtered by status and literal text in the title or message."""
+    """Return tickets newest first, optionally filtered by status, literal text in the title or message, and labels.
+
+    A ticket matches labels only when it has every one of them.
+    """
     require_page(limit, offset)
     if status is not None and status not in STATUSES:
         raise ValueError(f"Status must be one of: {', '.join(STATUSES)}.")
@@ -101,6 +106,10 @@ def list_tickets(
         search = require_text(search, "Search", 200)
         clauses.append("(instr(lower(title), lower(?)) > 0 OR instr(lower(message), lower(?)) > 0)")
         parameters.extend((search, search))
+    labelled = label_filter(labels)
+    if labelled is not None:
+        clauses.append(labelled[0])
+        parameters.extend(labelled[1])
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     with closing(connect(database)) as connection:
         return [

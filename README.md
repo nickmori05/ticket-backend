@@ -64,7 +64,9 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | --- | --- |
 | `create [--title T] [--message M] [--email E] [--idempotency-key K]` | Submit a ticket; prompts for a missing title or message |
 | `show ID` | Show one ticket |
-| `list [--status S] [--search TEXT] [--limit N] [--offset N]` | List tickets, newest first |
+| `list [--status S] [--search TEXT] [--label L ...] [--limit N] [--offset N]` | List tickets, newest first |
+| `label ID LABEL ...` / `unlabel ID LABEL ...` | Add / remove [labels](#labels) on a ticket |
+| `labels [ID]` | Show a ticket's labels, or every label in use with its ticket counts |
 | `status ID STATUS [--note TEXT]` | Change status to `open`, `in_progress`, or `closed` |
 | `history ID` | Show recorded status changes |
 | `comment ID BODY` / `comments ID` | Add a comment / list comments, oldest first |
@@ -104,6 +106,29 @@ status notes up to 500; surrounding whitespace is trimmed. Lists take `--limit`
 from 1 to 100 (default 20) and `--offset`. Search matches literal, case-insensitive
 text in the title or message, so `%` and `_` are not wildcards. Closed tickets can be
 reopened, and setting the current status again records nothing.
+
+## Labels
+
+Labels group tickets across statuses, such as by team, product area, or priority. A
+label is 1 to 32 ASCII letters, digits, dots, colons, underscores, or hyphens,
+starting with a letter or digit, and is stored in lowercase, so `Billing` and
+`billing` are the same label. A ticket can have up to 20.
+
+```sh
+python3 tickets.py label 1 billing priority:high
+python3 tickets.py unlabel 1 priority:high
+python3 tickets.py list --label billing --status open
+python3 tickets.py labels
+```
+
+Adding a label a ticket already has, or removing one it does not have, changes
+nothing and is not an error, so retrying either is safe. Labels can be changed on
+tickets in any status, and they do not record history or queue notifications.
+`list --label` can be repeated, up to five times, to find tickets with every one of
+the labels, and combines with `--status` and `--search`. `labels` without an ID
+lists every label in use, alphabetically, with how many tickets have it and how many
+of those are not closed. A label stops being listed once no ticket has it; there is
+no separate list of allowed labels.
 
 ## HTTP API
 
@@ -338,6 +363,7 @@ ticket_backend/
   api_audit.py              middleware that records each authenticated request
   audit.py                  audit log storage, listing, and pruning
   tickets.py                tickets, status history, comments, statistics
+  labels.py                 ticket labels and the label filter for listings
   submissions.py            idempotency keys, scoped to each token, and their pruning
   tokens.py                 token creation, revocation, and authentication
   ratelimit.py              per-token request limits kept in memory
