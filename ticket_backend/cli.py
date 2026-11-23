@@ -15,8 +15,8 @@ from ticket_backend.notifications import (
 )
 from ticket_backend.submissions import prune_submission_keys
 from ticket_backend.tickets import (
-    STATUSES, IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
-    list_tickets, set_status, statistics, ticket_history,
+    STATUSES, IdempotencyConflictError, StaleTicketError, TicketNotFoundError, add_comment, create_ticket, get_ticket,
+    list_comments, list_tickets, set_status, statistics, ticket_history, ticket_state,
 )
 from ticket_backend.tokens import SCOPES, TokenNotFoundError, create_token, list_tokens, revoke_token
 
@@ -45,6 +45,8 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("id", type=int)
     status.add_argument("status", choices=STATUSES)
     status.add_argument("--note", default="", help="Reason for this change (up to 500 characters)")
+    status.add_argument("--if-match", type=int, metavar="REVISION",
+                        help="Change the status only if the latest history entry still has this id")
     history = commands.add_parser("history", help="Show a ticket's recorded changes")
     history.add_argument("id", type=int)
     comment = commands.add_parser("comment", help="Add a comment to a ticket")
@@ -103,6 +105,8 @@ def display(command: str, result, action: str | None = None) -> None:
         if result.get("email"):
             print(f"Contact: {result['email']}")
         print(f"Created: {result['created_at']} UTC")
+        if "revision" in result:
+            print(f"Revision: {result['revision']}")
     elif command == "list":
         if not result:
             print("No tickets found.")
@@ -202,7 +206,8 @@ def main(argv: list[str] | None = None) -> int:
     """Run one command and return its exit code.
 
     0 means success, 1 a missing ticket, token, or notification, 2 invalid input or a storage error, 3 a reused
-    submission key with different content, 4 an unavailable SMTP server, and 130 cancellation.
+    submission key with different content, 4 an unavailable SMTP server, 5 a status change whose revision is no
+    longer current, and 130 cancellation.
     """
     args = parser().parse_args(argv)
     try:
@@ -219,7 +224,8 @@ def main(argv: list[str] | None = None) -> int:
             result = list_tickets(args.database, args.limit, offset=args.offset,
                                   status=args.status, search=args.search)
         elif args.command == "status":
-            result = set_status(args.id, args.status, args.database, note=args.note)
+            revisions = None if args.if_match is None else (args.if_match,)
+            result = set_status(args.id, args.status, args.database, note=args.note, revisions=revisions)
         elif args.command == "history":
             result = ticket_history(args.id, args.database)
         elif args.command == "comment":
@@ -250,12 +256,19 @@ def main(argv: list[str] | None = None) -> int:
             result = list_tokens(args.database)
         else:
             result = revoke_token(args.name, args.database)
+        # JSON stays the ticket itself, so scripts that compare it with the API do not see a new field.
+        if not args.json and args.command in ("create", "show", "status"):
+            _ticket, revision = ticket_state(result["id"], args.database)
+            result = {**result, "revision": revision}
     except (TicketNotFoundError, TokenNotFoundError, NotificationNotFoundError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     except IdempotencyConflictError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 3
+    except StaleTicketError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 5
     except DeliveryError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 4

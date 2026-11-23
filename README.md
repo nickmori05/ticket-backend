@@ -97,7 +97,14 @@ then needs both `--title` and `--message`.
 | `2` | Invalid input or configuration, or a storage error |
 | `3` | Idempotency key already used for different content |
 | `4` | SMTP server unreachable, or it rejected STARTTLS or the login |
+| `5` | Status change whose `--if-match` revision is no longer current |
 | `130` | Cancelled |
+
+`show` prints a ticket's revision in text output: the id of its latest history entry.
+`history` includes that id on each entry in JSON output. `status --if-match REVISION`
+applies only while that entry is still the latest. A stale revision exits with code 5
+and leaves the ticket unchanged. JSON output of `show` and `status` does not add a
+revision field.
 
 Titles are up to 120 characters, messages up to 10,000, comments up to 5,000, and
 status notes up to 500; surrounding whitespace is trimmed. Lists take `--limit`
@@ -142,9 +149,31 @@ and a token without the route's scope returns 403 with
 `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. A token over its
 [rate limit](#rate-limits) returns 429 with `Retry-After`. A missing ticket
 or notification returns 404, a reused idempotency key with different content or a
-retry of a notification that is not `failed` 409, invalid fields 422, and a storage
+retry of a notification that is not `failed` 409, a status change whose `If-Match` is not
+the ticket's current revision 412, invalid fields 422, and a storage
 failure 503 without exposing file paths. Unknown JSON fields are rejected. Ticket creation, status changes, and comments record the
 name of the token that made them.
+
+### Conditional status changes
+
+`GET /tickets/{id}` and a successful `PATCH /tickets/{id}/status` return an `ETag`: the
+ticket's revision in quotes, such as `"3"`. Send that value back as `If-Match` to apply
+the change only if that history entry is still the latest. A comma-separated list matches
+when one tag is current, `*` matches whatever the revision is now, and a weak tag such
+as `W/"3"` is compared the same way. Any other value returns 412 with the current `ETag`
+and writes nothing, including when the requested status is already set. Omitting
+`If-Match` overwrites the status as before. A malformed `If-Match` returns 422. Adding a
+comment does not change the revision. `POST /tickets` sends no `ETag`, because an
+idempotent replay returns the saved response rather than the ticket as it is now.
+
+```sh
+curl -D - -H "Authorization: Bearer $TICKETS_TOKEN" http://127.0.0.1:8000/tickets/1
+curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'If-Match: "1"' \
+  -d '{"status":"closed","note":"Fixed"}'
+```
 
 ### Token scopes and expiry
 
@@ -358,6 +387,12 @@ the current status, so the update, its history entry, and its notification alway
 agree. SQLite assigns IDs on insert, and writers wait up to five seconds for the lock
 before failing with a storage error.
 
+**Conditional updates.** A ticket's revision is the id of its newest history entry, or
+0 when it has none. A requested revision is compared inside the same immediate
+transaction, after the write lock is taken, so two status changes that both name the
+revision they read cannot both apply: the second sees the history entry the first just
+inserted. Clients that omit the revision keep the previous behavior.
+
 **Idempotent submissions.** A key (`--idempotency-key` or the `Idempotency-Key`
 header, 1–128 ASCII letters, digits, dots, underscores, or hyphens) is saved in
 `ticket_submission_keys` together with the caller and the original response, in the
@@ -438,8 +473,9 @@ python scripts/smoke_docker.py   # needs Docker
 ```
 
 The unit tests use temporary databases and cover validation, persistence, schema
-upgrades from older databases, transaction rollback, concurrent writers, idempotent
-retries, their per-token keys, and pruning them, token authentication, scopes, expiry, and rate limits,
+upgrades from older databases, transaction rollback, concurrent writers, conditional
+status changes, idempotent retries, their per-token keys, and pruning them, token
+authentication, scopes, expiry, and rate limits,
 the audit log, the CLI
 and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
 on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
@@ -460,6 +496,8 @@ test.
 
 - SQLite serializes writers, so this suits a small team or local use, not a busy
   shared service.
+- A status change that omits `If-Match` or `--if-match` still overwrites a concurrent
+  update. The revision follows status history only, so a comment does not move it.
 - Scopes are coarse (read, write, and emails across all tickets), and neither scopes
   nor rate limits can be changed after a token is created. Tokens travel in plain text
   over HTTP, so keep the API on loopback or behind HTTPS.
