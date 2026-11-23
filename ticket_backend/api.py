@@ -28,8 +28,8 @@ from ticket_backend.notifications import (
 )
 from ticket_backend.ratelimit import RateLimiter, rate_limit_from_environment, require_rate_limit
 from ticket_backend.tickets import (
-    IdempotencyConflictError, TicketNotFoundError, add_comment, create_ticket, get_ticket, list_comments,
-    list_tickets, set_status, statistics, ticket_history,
+    IdempotencyConflictError, StaleTicketError, TicketNotFoundError, add_comment, create_ticket, list_comments,
+    list_tickets, set_status, statistics, ticket_history, ticket_state,
 )
 from ticket_backend.tokens import token_access
 
@@ -40,6 +40,30 @@ TicketId = Annotated[int, PathParameter(gt=0)]
 NotificationId = Annotated[int, PathParameter(gt=0)]
 bearer = HTTPBearer(auto_error=False, description="A token from `tickets.py token create NAME`.")
 logger = logging.getLogger(__name__)
+# A strong entity tag, optionally weakened, whose opaque value is the ticket revision.
+_ENTITY_TAG = re.compile(r'^(?:W/)?"(0|[1-9][0-9]{0,18})"$')
+
+
+def entity_tag(revision: int) -> str:
+    """Return the ETag for a ticket revision, such as `"3"`."""
+    return f'"{revision}"'
+
+
+def revisions_from_if_match(header: str) -> tuple[int, ...] | None:
+    """Parse an If-Match header into revisions, or None when it is * so any current revision matches."""
+    value = header.strip()
+    if value == "*":
+        return None
+    revisions = []
+    for part in value.split(","):
+        match = _ENTITY_TAG.fullmatch(part.strip())
+        if match is None:
+            raise ValueError('If-Match must be *, or one or more quoted revisions such as "3".')
+        revision = int(match.group(1))
+        if revision > 2**63 - 1:
+            raise ValueError('If-Match must be *, or one or more quoted revisions such as "3".')
+        revisions.append(revision)
+    return tuple(revisions)
 
 
 class TicketInput(BaseModel):
@@ -157,6 +181,11 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
     async def conflicting_submission(_request: Request, error: IdempotencyConflictError):
         return JSONResponse(status_code=409, content={"detail": str(error)})
 
+    @app.exception_handler(StaleTicketError)
+    async def stale_ticket(_request: Request, error: StaleTicketError):
+        return JSONResponse(status_code=412, content={"detail": str(error)},
+                            headers={"ETag": entity_tag(error.revision)})
+
     @app.exception_handler(ValueError)
     async def invalid_value(_request: Request, error: ValueError):
         return JSONResponse(status_code=422, content={"detail": str(error)})
@@ -255,12 +284,27 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
                 for ticket in list_tickets(database, limit, offset=offset, status=status, search=search)]
 
     @protected.get("/tickets/{ticket_id}", response_model=TicketOutput)
-    def show(ticket_id: TicketId, access: Annotated[dict, Depends(reader)]):
-        return shown(get_ticket(ticket_id, database), access)
+    def show(ticket_id: TicketId, response: Response, access: Annotated[dict, Depends(reader)]):
+        """The ETag is the ticket's revision, the quoted id of its latest history entry."""
+        ticket, revision = ticket_state(ticket_id, database)
+        response.headers["ETag"] = entity_tag(revision)
+        return shown(ticket, access)
 
-    @protected.patch("/tickets/{ticket_id}/status", response_model=TicketOutput)
-    def change_status(ticket_id: TicketId, payload: StatusInput, access: Annotated[dict, Depends(writer)]):
-        return shown(set_status(ticket_id, payload.status, database, note=payload.note, author=access["name"]), access)
+    @protected.patch("/tickets/{ticket_id}/status", response_model=TicketOutput,
+                     responses={412: {"description": "If-Match does not name the ticket's current revision"}})
+    def change_status(
+        ticket_id: TicketId, payload: StatusInput, response: Response, access: Annotated[dict, Depends(writer)],
+        if_match: Annotated[str | None, Header(
+            description='The ticket\'s current ETag, a comma-separated list of them, or *. '
+                        'Omit to overwrite the status unconditionally. Example: "3".'
+        )] = None,
+    ):
+        revisions = None if if_match is None else revisions_from_if_match(if_match)
+        ticket = set_status(ticket_id, payload.status, database, note=payload.note, author=access["name"],
+                            revisions=revisions)
+        _current, revision = ticket_state(ticket_id, database)
+        response.headers["ETag"] = entity_tag(revision)
+        return shown(ticket, access)
 
     @protected.get("/tickets/{ticket_id}/history", response_model=list[EventOutput], dependencies=[Depends(reader)])
     def history(ticket_id: TicketId):
