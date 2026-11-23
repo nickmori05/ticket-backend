@@ -46,14 +46,19 @@ def main() -> int:
 
     token = None
 
-    def request(base, path, method="GET", payload=None, idempotency_key=None, authorized=True, bearer=None):
+    def request(base, path, method="GET", payload=None, idempotency_key=None, authorized=True, bearer=None,
+                if_match=None, captured=None):
         body = json.dumps(payload).encode() if payload is not None else None
         headers = {"Content-Type": "application/json"} if payload is not None else {}
         if authorized:
             headers["Authorization"] = f"Bearer {bearer or token}"
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
+        if if_match is not None:
+            headers["If-Match"] = if_match
         with urlopen(Request(base + path, data=body, headers=headers, method=method), timeout=5) as response:
+            if captured is not None:
+                captured["ETag"] = response.headers["ETag"]
             return response.status, json.load(response)
 
     def api_address():
@@ -109,6 +114,21 @@ def main() -> int:
         status, audit_log = request(address, f"/audit?token=smoke&ticket_id={http_id}")
         assert status == 200 and [(row["method"], row["status"]) for row in audit_log] == \
             [("PATCH", 200), ("POST", 201), ("POST", 201)], "API did not show the token's audited requests"
+        seen = {}
+        status, current = request(address, f"/tickets/{http_id}", captured=seen)
+        assert status == 200 and current["status"] == "closed" and seen.get("ETag", "").startswith('"'), \
+            f"Ticket response did not include an ETag: {seen}"
+        status, repeated = request(address, f"/tickets/{http_id}/status", "PATCH",
+                                   {"status": "closed", "note": "Again"}, if_match=seen["ETag"])
+        assert status == 200 and repeated["status"] == "closed", "Matching If-Match rejected a current revision"
+        try:
+            request(address, f"/tickets/{http_id}/status", "PATCH", {"status": "open", "note": "stale"},
+                    if_match='"0"')
+            raise AssertionError("API applied a status change with a stale If-Match")
+        except HTTPError as error:
+            assert error.code == 412 and error.headers["ETag"] == seen["ETag"], \
+                f"Expected 412 with the current ETag, got {error.code} {error.headers.get('ETag')}"
+        assert command("show", http_id)["status"] == "closed", "Stale If-Match changed the ticket"
         limited = command("token", "create", "smoke-limited", "--scope", "tickets:read", "--rate-limit", "2")["token"]
         for _ in range(2):
             assert request(address, "/stats", bearer=limited)[0] == 200, "Token was refused within its rate limit"
@@ -182,7 +202,8 @@ def main() -> int:
             raise AssertionError("API accepted a revoked token")
         except HTTPError as error:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
-        print("Docker CLI/API sharing, API tokens with scopes, status attribution, the audit log, rate limits, "
+        print("Docker CLI/API sharing, API tokens with scopes, status attribution, conditional status updates, "
+              "the audit log, rate limits, "
               "notification outbox, its API, and SMTP delivery, persistent per-token retries and key pruning, "
               "container recreation, and non-root execution passed.")
         return 0
