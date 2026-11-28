@@ -13,8 +13,8 @@ filed them by email.
   limited to scopes and a number of requests per minute, optionally expiring, and
   managed from the terminal.
 - **Safe retries**: an optional idempotency key, private to the token that sent it,
-  makes a repeated submission return the original ticket instead of creating a duplicate,
-  until old keys are pruned.
+  makes a repeated ticket submission or comment return the original instead of creating
+  a duplicate, until old keys are pruned.
 - **Audit log** of every request made with a token: which token, what route, which
   ticket, and the result, readable over HTTP by tokens with `audit:read`.
 - **Email notifications** through a transactional outbox, delivered over SMTP with
@@ -67,7 +67,7 @@ Run `python3 tickets.py COMMAND --help` for every option.
 | `list [--status S] [--search TEXT] [--limit N] [--offset N]` | List tickets, newest first |
 | `status ID STATUS [--note TEXT]` | Change status to `open`, `in_progress`, or `closed` |
 | `history ID` | Show recorded status changes |
-| `comment ID BODY` / `comments ID` | Add a comment / list comments, oldest first |
+| `comment ID BODY [--idempotency-key K]` / `comments ID` | Add a comment / list comments, oldest first |
 | `stats` | Count tickets by status |
 | `outbox [--status S] [--ticket ID] [--limit N] [--offset N]` | List queued notifications, oldest first |
 | `send-notifications [--limit N] [--max-attempts N] [--retry-delay S]` | Send due notifications over SMTP |
@@ -173,6 +173,24 @@ curl -X PATCH http://127.0.0.1:8000/tickets/1/status \
   -H 'Content-Type: application/json' \
   -H 'If-Match: "1"' \
   -d '{"status":"closed","note":"Fixed"}'
+```
+
+### Idempotent comments
+
+`POST /tickets/{id}/comments` takes the same `Idempotency-Key` header as `POST /tickets`.
+The key belongs to the token and to that ticket. Sending it again with the same body
+returns the original comment, still with 201. A different body returns 409 and adds
+nothing, and the response does not include the original text. The same key on another
+ticket, or from another token, is a new comment, and it is not the submission key of
+the same name. Omitting the header adds a comment on every call. From the terminal,
+`comment --idempotency-key` follows the same rules and a conflict exits with code 3.
+
+```sh
+curl -X POST http://127.0.0.1:8000/tickets/1/comments \
+  -H "Authorization: Bearer $TICKETS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: login-note-1' \
+  -d '{"body":"Asked for logs"}'
 ```
 
 ### Token scopes and expiry
@@ -367,7 +385,7 @@ ticket_backend/
   api_audit.py              middleware that records each authenticated request
   audit.py                  audit log storage, listing, and pruning
   tickets.py                tickets, status history, comments, statistics
-  submissions.py            idempotency keys, scoped to each token, and their pruning
+  submissions.py            idempotency keys for submissions and comments, and their pruning
   tokens.py                 token creation, revocation, and authentication
   ratelimit.py              per-token request limits kept in memory
   notifications.py          outbox queries, delivery, and retries
@@ -410,19 +428,28 @@ as its ticket's creator; keys whose ticket has no recorded creator, because it c
 from the terminal or predates attribution, stay shared by every caller as before, so
 no retry in flight during an upgrade creates a duplicate.
 
-Keys are kept until `keys prune --older-than DAYS` deletes those saved more than the
-given number of days ago, from every caller, so run it on a schedule to keep
-`ticket_submission_keys` from growing with every keyed submission:
+A comment uses the same kind of key. `comment --idempotency-key` and the header on
+`POST /tickets/{id}/comments` save it in `ticket_comment_keys` with the caller and the
+ticket, in the transaction that inserts the comment. Reusing it for the same body
+returns that comment. A different body conflicts, and an invalid comment does not
+reserve its key. The key applies to one ticket, so the same key on another ticket is
+a new comment. A retry does not change the ticket's status, history, or revision.
+
+Keys are kept until `keys prune --older-than DAYS` deletes submission and comment keys
+saved more than the given number of days ago, from every caller, so run it on a
+schedule to keep those tables from growing with every keyed submission or comment:
 
 ```text
 0 3 * * * cd /path/to/ticket-backend && python3 tickets.py keys prune --older-than 30
 ```
 
-Tickets are never deleted, only the ability to replay their submission: a pruned key
-used again, with any content, creates a new ticket instead of returning the original
-or a 409. Choose an age well beyond how long any client keeps retrying one submission.
+Tickets and comments are never deleted, only the ability to replay them: a pruned
+submission key used again, with any content, creates a new ticket instead of returning
+the original or a 409, and a pruned comment key adds another comment. Choose an age
+well beyond how long any client keeps retrying one submission or comment.
 Keys saved by earlier versions have no saved time, so they are pruned by the age of
-their ticket, which was created in the same transaction.
+their ticket, which was created in the same transaction. Comment keys always have a
+saved time.
 
 **Authentication.** Tokens are 256-bit random values. Only their SHA-256 hashes are
 stored, so a lost token cannot be recovered, only revoked and replaced under a new
@@ -474,10 +501,9 @@ python scripts/smoke_docker.py   # needs Docker
 
 The unit tests use temporary databases and cover validation, persistence, schema
 upgrades from older databases, transaction rollback, concurrent writers, conditional
-status changes, idempotent retries, their per-token keys, and pruning them, token
-authentication, scopes, expiry, and rate limits,
-the audit log, the CLI
-and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
+status changes, idempotent retries of submissions and comments, their per-token keys,
+and pruning them, token authentication, scopes, expiry, and rate limits, the audit log,
+the CLI and HTTP interfaces, and notification delivery. SMTP tests talk to a small SMTP server
 on 127.0.0.1 inside the test process (`tests/smtp_stub.py`) and never contact a real mail server. The Docker smoke test
 builds the image and checks that the API and CLI containers share data, that a
 read-only token cannot write, see emails, or read the outbox or audit log, that the
@@ -485,9 +511,10 @@ CLI sees requests the API recorded in the audit log, that a token over its rate 
 gets 429 and is not audited, that the API sees
 notifications the CLI sent, that tickets, tokens, and idempotency
 keys survive container recreation, that the CLI's keys are separate from the API
-token's, that the CLI prunes an old key so the API's next retry creates a new ticket,
-that the image runs as a
-non-root user, and that `send-notifications` delivers through the image. It uses a
+token's, that a repeated comment key returns the original comment and a different body
+is refused, that the CLI prunes an old key so the API's next retry creates a new ticket
+or comment, that the image runs as a non-root user, and that `send-notifications`
+delivers through the image. It uses a
 random loopback port and removes only its own Compose project and volume. GitHub
 Actions runs ruff, the unit tests on Python 3.10, 3.11, and 3.14, and the Docker smoke
 test.
@@ -508,9 +535,10 @@ test.
   `local`). Entries from before attribution existed have none either.
 - Idempotency keys are deleted only by `keys prune`, which needs an external
   scheduler, and a key pruned while a client is still retrying lets that retry create a
-  duplicate. Keys belong to a token's name, so a replacement token cannot replay keys
-  sent by the one it replaces. Keys saved by earlier versions
-  for tickets with no recorded creator remain shared by every caller.
+  duplicate ticket or another comment. Keys belong to a token's name, so a replacement
+  token cannot replay keys sent by the one it replaces. Comment keys are also scoped to
+  one ticket. A comment sent without a key is stored again on every retry. Keys saved
+  by earlier versions for tickets with no recorded creator remain shared by every caller.
 - The audit log is written after each request, not in the same transaction, so a
   crash or storage failure between the two leaves a completed request unrecorded.
   Requests without a valid token are not recorded, the client address is the proxy's

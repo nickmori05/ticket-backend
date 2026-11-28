@@ -12,7 +12,9 @@ from ticket_backend import cli
 from ticket_backend.api import create_app
 from ticket_backend.database import connect
 from ticket_backend.submissions import prune_submission_keys
-from ticket_backend.tickets import IdempotencyConflictError, create_ticket, get_ticket, list_tickets
+from ticket_backend.tickets import (
+    IdempotencyConflictError, add_comment, create_ticket, get_ticket, list_comments, list_tickets,
+)
 from ticket_backend.tokens import create_token
 
 
@@ -131,6 +133,53 @@ class KeyRetentionTests(unittest.TestCase):
                 cli.main(["--database", str(self.database), *arguments])
         self.assertEqual(self.keys(), [("", "k5")])
 
+    def comment(self, key, author=None, body="Asked for logs", ticket_id=None):
+        if ticket_id is None:
+            ticket_id = self.create(None)["id"]
+        return add_comment(ticket_id, body, self.database, author=author, idempotency_key=key)
+
+    def age_comment_key(self, key, days, author=None, ticket_id=None):
+        with closing(connect(self.database)) as connection, connection:
+            connection.execute(
+                """UPDATE ticket_comment_keys SET created_at = datetime('now', ?)
+                   WHERE owner = ? AND idempotency_key = ? AND (? IS NULL OR ticket_id = ?)""",
+                (f"-{days} days", author or "", key, ticket_id, ticket_id),
+            )
+
+    def comment_keys(self):
+        with closing(connect(self.database)) as connection:
+            rows = connection.execute(
+                "SELECT owner, ticket_id, idempotency_key FROM ticket_comment_keys ORDER BY rowid"
+            )
+            return [tuple(row) for row in rows]
+
+    def test_pruning_deletes_old_comment_keys_and_keeps_the_comments(self):
+        ticket = self.create(None)
+        old = self.comment("old", ticket_id=ticket["id"])
+        recent = self.comment("recent", ticket_id=ticket["id"], body="Still fresh")
+        self.age_comment_key("old", 40, ticket_id=ticket["id"])
+        self.age_comment_key("recent", 10, ticket_id=ticket["id"])
+        submission = self.create("submission")
+        self.age_key("submission", 40)
+        self.assertEqual(prune_submission_keys(30, self.database), {"deleted": 2})
+        self.assertEqual(self.comment_keys(), [("", ticket["id"], "recent")])
+        self.assertEqual(self.keys(), [])
+        self.assertEqual(list_comments(ticket["id"], self.database), [old, recent])
+        self.assertEqual(get_ticket(submission["id"], self.database), submission)
+        self.assertEqual(self.comment("recent", ticket_id=ticket["id"], body="Still fresh"), recent)
+
+    def test_a_pruned_comment_key_adds_another_comment_instead_of_conflicting(self):
+        ticket = self.create(None)
+        first = self.comment("k1", ticket_id=ticket["id"])
+        self.age_comment_key("k1", 40, ticket_id=ticket["id"])
+        prune_submission_keys(30, self.database)
+        second = self.comment("k1", ticket_id=ticket["id"], body="Different note")
+        self.assertNotEqual(second["id"], first["id"])
+        self.assertEqual(self.comment("k1", ticket_id=ticket["id"], body="Different note"), second)
+        with self.assertRaises(IdempotencyConflictError):
+            self.comment("k1", ticket_id=ticket["id"])
+        self.assertEqual(list_comments(ticket["id"], self.database), [first, second])
+
     def test_an_api_retry_after_pruning_creates_a_new_ticket(self):
         authorization = {"Authorization": f"Bearer {create_token('tests', self.database)['token']}"}
         payload, headers = {"title": "Login", "message": "Cannot sign in"}, {"Idempotency-Key": "submission-1"}
@@ -143,6 +192,32 @@ class KeyRetentionTests(unittest.TestCase):
         self.assertEqual(retry.status_code, 201)
         self.assertNotEqual(retry.json()["id"], first.json()["id"])
         self.assertEqual(self.keys(), [("tests", "submission-1")])
+
+    def test_an_api_comment_retry_after_pruning_adds_another_comment(self):
+        authorization = {"Authorization": f"Bearer {create_token('tests', self.database)['token']}"}
+        ticket = self.create(None)
+        payload, headers = {"body": "Asked for logs"}, {"Idempotency-Key": "comment-1"}
+        url = f"/tickets/{ticket['id']}/comments"
+        with TestClient(create_app(self.database), headers=authorization) as client:
+            first = client.post(url, json=payload, headers=headers)
+            self.assertEqual(client.post(url, json=payload, headers=headers).json(), first.json())
+            self.age_comment_key("comment-1", 40, "tests", ticket["id"])
+            self.assertEqual(prune_submission_keys(30, self.database), {"deleted": 1})
+            retry = client.post(url, json=payload, headers=headers)
+        self.assertEqual(retry.status_code, 201)
+        self.assertNotEqual(retry.json()["id"], first.json()["id"])
+        self.assertEqual(list_comments(ticket["id"], self.database), [first.json(), retry.json()])
+
+    def test_existing_databases_gain_the_comment_key_index(self):
+        ticket = self.create(None)
+        first = self.comment("k1", ticket_id=ticket["id"])
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("DROP INDEX ticket_comment_keys_created_at")
+        self.assertEqual(self.comment("k1", ticket_id=ticket["id"]), first)
+        with closing(sqlite3.connect(self.database)) as connection:
+            names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        self.assertIn("ticket_comment_keys_created_at", names)
+        self.assertEqual(prune_submission_keys(1, self.database), {"deleted": 0})
 
 
 if __name__ == "__main__":

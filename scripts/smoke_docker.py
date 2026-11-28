@@ -26,6 +26,8 @@ import sqlite3
 with sqlite3.connect("/data/tickets.db") as connection:
     connection.execute("UPDATE ticket_submission_keys SET created_at = datetime('now', '-2 days') "
                        "WHERE owner = 'smoke'")
+    connection.execute("UPDATE ticket_comment_keys SET created_at = datetime('now', '-2 days') "
+                       "WHERE owner = 'smoke'")
 """
 
 
@@ -155,6 +157,20 @@ def main() -> int:
         status, comment = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "From HTTP"})
         assert status == 201 and comment["author"] == "smoke"
         assert command("comments", http_id)[0]["author"] == "smoke", "CLI did not see the comment author"
+        comment_key = "comment-" + key
+        status, noted = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "Keyed note"},
+                                comment_key)
+        assert status == 201 and noted["author"] == "smoke"
+        status, repeated_note = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "Keyed note"},
+                                        comment_key)
+        assert status == 201 and repeated_note == noted, "Comment retry did not return the original"
+        try:
+            request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "Different note"}, comment_key)
+            raise AssertionError("API added a comment when its idempotency key was reused for a different body")
+        except HTTPError as error:
+            assert error.code == 409, f"Expected 409 for a conflicting comment key, got {error.code}"
+        bodies = [row["body"] for row in command("comments", http_id)]
+        assert bodies == ["From HTTP", "Keyed note"], f"Conflicting comment key wrote a comment: {bodies}"
         status, restored = request(api_address(), f"/tickets/{http_id}")
         assert status == 200 and restored["status"] == "closed"
         status, replayed = request(api_address(), "/tickets", "POST", payload, key)
@@ -191,11 +207,19 @@ def main() -> int:
         assert local["id"] not in (created["id"], submitted["id"]), "CLI shared an API token's idempotency key"
         status, replayed = request(api_address(), "/tickets", "POST", payload, key)
         assert status == 201 and replayed == submitted, "CLI key changed the token's replay"
+        local_comment = command("comment", http_id, "Same key as the token", "--idempotency-key", comment_key)
+        assert local_comment["id"] != noted["id"], "CLI shared an API token's comment key"
+        status, replayed_note = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "Keyed note"},
+                                        comment_key)
+        assert status == 201 and replayed_note == noted, "CLI comment key changed the token's replay"
         assert command("keys", "prune", "--older-than", "1") == {"deleted": 0}, "Pruning deleted fresh keys"
         run("run", "--rm", "-T", "--entrypoint", "python", "tickets", "-c", AGE_TOKEN_KEYS)
-        assert command("keys", "prune", "--older-than", "1") == {"deleted": 1}, "CLI did not prune the old key"
+        assert command("keys", "prune", "--older-than", "1") == {"deleted": 2}, "CLI did not prune the old keys"
         status, renewed = request(api_address(), "/tickets", "POST", payload, key)
         assert status == 201 and renewed["id"] != submitted["id"], "API replayed a pruned idempotency key"
+        status, renewed_note = request(api_address(), f"/tickets/{http_id}/comments", "POST", {"body": "Keyed note"},
+                                       comment_key)
+        assert status == 201 and renewed_note["id"] != noted["id"], "API replayed a pruned comment key"
         command("token", "revoke", "smoke")
         try:
             request(api_address(), "/stats")
@@ -204,8 +228,8 @@ def main() -> int:
             assert error.code == 401, f"Expected 401 for a revoked token, got {error.code}"
         print("Docker CLI/API sharing, API tokens with scopes, status attribution, conditional status updates, "
               "the audit log, rate limits, "
-              "notification outbox, its API, and SMTP delivery, persistent per-token retries and key pruning, "
-              "container recreation, and non-root execution passed.")
+              "notification outbox, its API, and SMTP delivery, persistent per-token retries, comment retries, "
+              "and key pruning, container recreation, and non-root execution passed.")
         return 0
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)

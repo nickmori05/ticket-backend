@@ -310,9 +310,19 @@ def create_app(database: Path | None = None, *, rate_limit: int | None = None) -
     def history(ticket_id: TicketId):
         return ticket_history(ticket_id, database)
 
-    @protected.post("/tickets/{ticket_id}/comments", status_code=201, response_model=CommentOutput)
-    def comment(ticket_id: TicketId, payload: CommentInput, access: Annotated[dict, Depends(writer)]):
-        return add_comment(ticket_id, payload.body, database, author=access["name"])
+    @protected.post("/tickets/{ticket_id}/comments", status_code=201, response_model=CommentOutput,
+                    responses={409: {"description": "This token already used the key for a different comment "
+                                                    "on this ticket"}})
+    def comment(
+        ticket_id: TicketId,
+        payload: CommentInput,
+        access: Annotated[dict, Depends(writer)],
+        idempotency_key: Annotated[str | None, Header(
+            description="Reuse for retries of one comment on this ticket; each token has its own keys. "
+                        "1-128 ASCII letters, digits, dots, underscores, or hyphens."
+        )] = None,
+    ):
+        return add_comment(ticket_id, payload.body, database, author=access["name"], idempotency_key=idempotency_key)
 
     @protected.get("/tickets/{ticket_id}/comments", response_model=list[CommentOutput], dependencies=[Depends(reader)])
     def comments(ticket_id: TicketId):

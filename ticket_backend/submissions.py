@@ -1,8 +1,10 @@
-"""Idempotency keys for ticket submissions. Each caller has its own keys, so one token cannot replay another's.
+"""Idempotency keys for ticket submissions and comments. Each caller has its own keys, so one token cannot replay
+another's.
 
-A caller is identified by its author: the token name over HTTP, or no author from the terminal. Keys saved before
-keys were scoped are read from the older ticket_submissions table and never rewritten. Keys are kept until
-prune_submission_keys deletes them by age; after that, the same key creates a new ticket.
+A caller is identified by its author: the token name over HTTP, or no author from the terminal. Submission keys
+saved before keys were scoped are read from the older ticket_submissions table and never rewritten. Comment keys
+are also scoped to the ticket they were used on. Keys are kept until prune_submission_keys deletes them by age;
+after that, the same key creates a new ticket or comment.
 """
 
 from contextlib import closing
@@ -52,11 +54,31 @@ def save_submission(connection: sqlite3.Connection, key: str, author: str | None
     )
 
 
+def saved_comment(connection: sqlite3.Connection, key: str, author: str | None, ticket_id: int) -> dict | None:
+    """Return the comment saved for this caller's key on this ticket, or None when it has not been used."""
+    row = connection.execute(
+        """SELECT response_json FROM ticket_comment_keys
+           WHERE owner = ? AND ticket_id = ? AND idempotency_key = ?""",
+        (_owner(author), ticket_id, key),
+    ).fetchone()
+    return json.loads(row["response_json"]) if row is not None else None
+
+
+def save_comment(connection: sqlite3.Connection, key: str, author: str | None, comment: dict) -> None:
+    """Record the comment for this caller's key in the transaction that inserted it."""
+    connection.execute(
+        """INSERT INTO ticket_comment_keys (owner, ticket_id, idempotency_key, comment_id, response_json)
+           VALUES (?, ?, ?, ?, ?)""",
+        (_owner(author), comment["ticket_id"], key, comment["id"], json.dumps(comment, ensure_ascii=False)),
+    )
+
+
 def prune_submission_keys(older_than_days: int, database: Path = DEFAULT_DATABASE) -> dict:
     """Delete idempotency keys saved more than a number of days ago and return how many were deleted.
 
-    Older keys have no saved time, so they are aged by their ticket, which was created in the same transaction.
-    Tickets are kept; only the ability to replay their submission ends.
+    Older submission keys have no saved time, so they are aged by their ticket, which was created in the same
+    transaction. Comment keys are aged by when they were saved. Tickets and comments are kept; only the ability
+    to replay them ends.
     """
     age = require_age_days(older_than_days)
     with closing(connect(database)) as connection, connection:
@@ -67,5 +89,8 @@ def prune_submission_keys(older_than_days: int, database: Path = DEFAULT_DATABAS
             """DELETE FROM ticket_submissions WHERE ticket_id IN
                (SELECT id FROM tickets WHERE created_at < datetime('now', ?))""",
             (age,),
+        ).rowcount
+        deleted += connection.execute(
+            "DELETE FROM ticket_comment_keys WHERE created_at < datetime('now', ?)", (age,)
         ).rowcount
     return {"deleted": deleted}
