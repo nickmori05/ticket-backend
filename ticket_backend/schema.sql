@@ -49,6 +49,20 @@ CREATE TABLE IF NOT EXISTS ticket_comments (
 
 CREATE INDEX IF NOT EXISTS ticket_comments_ticket_id ON ticket_comments(ticket_id, id);
 
+-- One saved comment response per caller, ticket, and key. A retry returns it instead of inserting again.
+CREATE TABLE IF NOT EXISTS ticket_comment_keys (
+    -- The token name, or '' for comments without an author, such as those from the terminal.
+    owner TEXT NOT NULL,
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id),
+    idempotency_key TEXT NOT NULL,
+    comment_id INTEGER NOT NULL REFERENCES ticket_comments(id),
+    response_json TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (owner, ticket_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS ticket_comment_keys_created_at ON ticket_comment_keys(created_at);
+
 CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,

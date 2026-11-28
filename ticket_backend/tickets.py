@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ticket_backend.database import DEFAULT_DATABASE, connect
 from ticket_backend.notifications import queue_notification
-from ticket_backend.submissions import require_key, save_submission, saved_submission
+from ticket_backend.submissions import require_key, save_comment, save_submission, saved_comment, saved_submission
 from ticket_backend.validation import optional_author, optional_email, require_id, require_page, require_text
 
 
@@ -232,23 +232,40 @@ def add_comment(
     database: Path = DEFAULT_DATABASE,
     *,
     author: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict:
-    """Add a comment to a ticket in any status, without changing its status or history."""
+    """Add a comment to a ticket in any status, or replay the saved comment for a reused key.
+
+    Keys belong to the author and to one ticket, so each token, and the terminal (no author), has its own on each
+    ticket. The same key on another ticket is a new comment. Raises IdempotencyConflictError when this author
+    already used the key on this ticket for a different body. A comment does not change the ticket's status or
+    history.
+    """
     ticket_id = require_id(ticket_id)
     body = require_text(body, "Comment", 5_000)
     author = optional_author(author)
+    idempotency_key = require_key(idempotency_key)
     with closing(connect(database)) as connection:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
             if connection.execute("SELECT id FROM tickets WHERE id = ?", (ticket_id,)).fetchone() is None:
                 raise TicketNotFoundError(f"Ticket #{ticket_id} was not found.")
+            if idempotency_key is not None:
+                comment = saved_comment(connection, idempotency_key, author, ticket_id)
+                if comment is not None:
+                    if comment["body"] != body:
+                        raise IdempotencyConflictError("Idempotency key was already used for a different comment.")
+                    return comment
             cursor = connection.execute(
                 "INSERT INTO ticket_comments (ticket_id, body, author) VALUES (?, ?, ?)",
                 (ticket_id, body, author),
             )
-            return dict(connection.execute(
+            comment = dict(connection.execute(
                 "SELECT * FROM ticket_comments WHERE id = ?", (cursor.lastrowid,)
             ).fetchone())
+            if idempotency_key is not None:
+                save_comment(connection, idempotency_key, author, comment)
+            return comment
 
 
 def list_comments(ticket_id: int, database: Path = DEFAULT_DATABASE) -> list[dict]:
