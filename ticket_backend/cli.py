@@ -52,6 +52,9 @@ def parser() -> argparse.ArgumentParser:
     comment = commands.add_parser("comment", help="Add a comment to a ticket")
     comment.add_argument("id", type=int)
     comment.add_argument("body", help="Comment text (up to 5000 characters)")
+    comment.add_argument("--idempotency-key",
+                         help="Reuse this key when retrying the same comment on this ticket "
+                              "(separate from API tokens' keys)")
     comments = commands.add_parser("comments", help="Show a ticket's comments")
     comments.add_argument("id", type=int)
     commands.add_parser("stats", help="Count tickets by status")
@@ -229,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "history":
             result = ticket_history(args.id, args.database)
         elif args.command == "comment":
-            result = add_comment(args.id, args.body, args.database)
+            result = add_comment(args.id, args.body, args.database, idempotency_key=args.idempotency_key)
         elif args.command == "comments":
             result = list_comments(args.id, args.database)
         elif args.command == "stats":
