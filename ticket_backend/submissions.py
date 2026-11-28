@@ -76,8 +76,9 @@ def save_comment(connection: sqlite3.Connection, key: str, author: str | None, c
 def prune_submission_keys(older_than_days: int, database: Path = DEFAULT_DATABASE) -> dict:
     """Delete idempotency keys saved more than a number of days ago and return how many were deleted.
 
-    Older keys have no saved time, so they are aged by their ticket, which was created in the same transaction.
-    Tickets are kept; only the ability to replay their submission ends.
+    Older submission keys have no saved time, so they are aged by their ticket, which was created in the same
+    transaction. Comment keys are aged by when they were saved. Tickets and comments are kept; only the ability
+    to replay them ends.
     """
     age = require_age_days(older_than_days)
     with closing(connect(database)) as connection, connection:
@@ -88,5 +89,8 @@ def prune_submission_keys(older_than_days: int, database: Path = DEFAULT_DATABAS
             """DELETE FROM ticket_submissions WHERE ticket_id IN
                (SELECT id FROM tickets WHERE created_at < datetime('now', ?))""",
             (age,),
+        ).rowcount
+        deleted += connection.execute(
+            "DELETE FROM ticket_comment_keys WHERE created_at < datetime('now', ?)", (age,)
         ).rowcount
     return {"deleted": deleted}
